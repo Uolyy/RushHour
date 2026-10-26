@@ -135,6 +135,15 @@
       writing-mode: vertical-rl; padding: 16px 10px; font-size: 11px; letter-spacing: 3px; opacity: .7;
     }
     #check-btn:hover { opacity: 1; }
+    .menu-cell:disabled { opacity: .45; cursor: default; }
+    #race-players .ready::after { content: ' ✔'; color: #7fdc7f; }
+    #custom-warn {
+      position: fixed; left: 14px; top: 50%; transform: translateY(-50%);
+      writing-mode: vertical-rl; pointer-events: none;
+      font-size: 11px; font-weight: 700; letter-spacing: 2px; color: #ffd257;
+      text-shadow: 0 1px 8px rgba(0, 0, 0, .7);
+      max-height: 70vh; display: none;
+    }
     @media (max-width: 1150px) {
       #menu-flex { flex-direction: column; align-items: center; gap: 20px; }
       #leaderboard { position: static; margin-top: 20px; }
@@ -143,6 +152,7 @@
 </head>
 <body>
   <div id="vignette"></div>
+  <div id="custom-warn">РЕКОРД НЕ ЗАПИШЕТСЯ — ТРАФИК/ПОЛОСЫ ОТЛИЧАЮТСЯ ОТ СТАНДАРТА</div>
   <div id="hud">
     <div id="hud-score">
       <div class="label">SCORE</div>
@@ -179,7 +189,7 @@
       <div class="menu-col">
         <div id="auth-box">
           <div class="menu-row">
-            <input id="nick-input" class="menu-input" style="width:226px" maxlength="16" placeholder="ТВОЙ НИК" />
+            <input id="nick-input" class="menu-input" style="width:226px" maxlength="15" placeholder="ТВОЙ НИК" />
             <button class="menu-cell" id="auth-login" style="width:120px">ИГРАТЬ</button>
           </div>
           <button class="menu-cell" id="auth-guest" style="width:364px">ИГРАТЬ БЕЗ РЕЙТИНГА</button>
@@ -191,7 +201,7 @@
           </div>
           <div class="menu-row">
             <button class="menu-btn" id="traffic-minus">−</button>
-            <span id="traffic-label" class="menu-mid">ТРАФИК: 16</span>
+            <span id="traffic-label" class="menu-mid">ТРАФИК: 14</span>
             <button class="menu-btn" id="traffic-plus">+</button>
           </div>
           <div class="menu-row">
@@ -203,8 +213,8 @@
             <button class="menu-cell" id="standard-toggle">СТАНДАРТ</button>
           </div>
           <div id="race-box">
-            <div class="race-title">СЕТЕВАЯ ГОНКА</div>
-            <div class="menu-row" id="race-mode-row">
+            <div class="race-title">СЕТЕВАЯ ГОНКА · ДО 4 ИГРОКОВ</div>
+            <div class="menu-row" id="race-mode-row" style="display:none">
               <button class="menu-cell" id="race-mode-endless">БЕСКОНЕЧНАЯ</button>
               <button class="menu-cell" id="race-mode-timed">НА ВРЕМЯ</button>
             </div>
@@ -217,8 +227,8 @@
             </div>
             <div id="race-status"></div>
             <div id="race-players"></div>
-            <div class="menu-row" id="race-start-row" style="display:none">
-              <button class="menu-cell" id="race-start" style="width:200px">СТАРТ ГОНКИ</button>
+            <div class="menu-row" id="ready-row" style="display:none">
+              <button class="menu-cell" id="race-ready" style="width:200px">ГОТОВ</button>
             </div>
           </div>
           <div id="settings-row">

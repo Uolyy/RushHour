@@ -30,7 +30,7 @@ export const PLAYER = {
 };
 
 export const TRAFFIC = {
-  COUNT: 16,
+  COUNT: 14,
   MAX: 30,
   SPAWN_AHEAD_MIN: 320,
   SPAWN_AHEAD_MAX: 540,

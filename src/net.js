@@ -42,7 +42,8 @@ export class RaceNet {
 
   create(nick) { this.connect(); this.send({ t: 'create', nick }); }
   join(code, nick) { this.connect(); this.send({ t: 'join', code, nick }); }
-  start(lanes, traffic, mode) { this.send({ t: 'start', lanes, traffic, mode }); }
+  ready(val) { this.send({ t: 'ready', val }); }
+  cfg(mode, lanes, traffic) { this.send({ t: 'cfg', mode, lanes, traffic }); }
   finish(score) { this.send({ t: 'finish', score }); }
   state(s, lat, v) { this.send({ t: 'state', s, lat, v }); }
   traffic(arr) { this.send({ t: 'traffic', arr }); }

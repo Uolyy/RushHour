@@ -248,6 +248,8 @@ const race = {
   mode: 'endless',     // 'endless' | 'timed'
   finishS: Infinity,   // дистанция финиша (timed)
   milestone: 0,        // сколько подсказок «ФИНИШ ЧЕРЕЗ ...» уже показали
+  readyMe: false,      // нажал ли «ГОТОВ» в лобби
+  countdown: false,    // идёт отсчёт перед стартом
   isHost: false,
 };
 // Все, кто закончил заезд (финишировал или разбился) — для списка игроков.
@@ -341,6 +343,15 @@ function updateCamera(dt, menu) {
 }
 
 // --- Старт/рестарт заезда ---
+// Стандартные настройки (трафик 14, полосы 4) — единственные, чьи результаты
+// попадают в общую таблицу рекордов.
+const isStandardCfg = () => trafficCount === TRAFFIC.COUNT && laneCount === 4;
+function updateCustomWarn() {
+  hud.setCustomWarn(!isStandardCfg());
+}
+
+let runStandard = true; // какими настройками стартовал текущий (сольный) заезд
+
 function beginRun() {
   audio.init();
   music.init(audio.ctx);
@@ -350,6 +361,8 @@ function beginRun() {
   if (settings.music) music.start();
   music.duck(1);
   resetWorld((Math.random() * 1e9) | 0);
+  runStandard = isStandardCfg();
+  updateCustomWarn();
   state = 'play';
   hud.setPanel(false);
   hud.hideOverlay();
@@ -389,18 +402,22 @@ function beginRace(cfg) {
   race.milestone = 0;
   race.mode = cfg.mode === 'timed' ? 'timed' : 'endless';
   race.finishS = race.mode === 'timed' ? RACE.LENGTH : Infinity;
+  race.readyMe = false;
+  race.countdown = false;
   laneCount = cfg.lanes;
   trafficCount = cfg.traffic;
   road.setLaneCount(laneCount);
   resetWorld(cfg.seed);
   placeFinishGate();
 
-  // Стартовая решётка: рассредотачиваем машины, иначе все стартуют в одной
-  // точке и мгновенно сталкиваются (s=30, lat=0 у всех).
-  const lim = road.halfWidth - 1.25;
-  const slot = Math.max(0, race.players.findIndex((p) => p.id === race.myId));
-  const spacing = race.players.length > 1 ? Math.min(2.4, (2 * lim) / (race.players.length - 1)) : 0;
-  player.lat = clamp((slot - (race.players.length - 1) / 2) * spacing, -lim, lim);
+  // Стартовая решётка: каждый игрок — в своей полосе (по порядку входа в комнату).
+  // Если игроков больше, чем полос, вторые ряды встают позади на 7 м — никто
+  // не спавнится друг в друге (дистанция ряда больше длины машины).
+  const myIdx = Math.max(0, race.players.findIndex((p) => p.id === race.myId));
+  const lane = myIdx % laneCount;
+  const row = Math.floor(myIdx / laneCount);
+  player.lat = -road.roadwayHalf + road.laneWidth * (lane + 0.5);
+  player.s = 30 - row * 7;
   player.latVel = 0;
   player.place(road);
 
@@ -422,15 +439,17 @@ function beginRace(cfg) {
 
   state = 'play';
   hud.setPanel(false);
+  hud.setMsg('');
   hud.hideOverlay();
   hud.setPlaying(true);
   hud.setRaceUi('menu');
+  hud.setCustomWarn(false); // в сетевой гонке рекорды не пишутся — предупреждение не нужно
   mouse.virt = 0;
   hud.setTrafficLabel(trafficCount);
   hud.setLanesLabel(laneCount);
   stateTimer = 0;
   trafficTimer = 0;
-  hud.toast(race.mode === 'timed' ? 'ГОНКА НА ВРЕМЯ — ФИНИШ ЧЕРЕЗ ' + RACE.LENGTH + ' М' : 'ГОНКА!');
+  hud.toast('ПОЕХАЛИ!' + (race.mode === 'timed' ? ' ФИНИШ ЧЕРЕЗ ' + RACE.LENGTH + ' М' : ''));
   if (mode === 'mouse') lockPointer();
 }
 
@@ -444,6 +463,8 @@ function endRaceCleanup() {
   race.milestone = 0;
   race.mode = 'endless';
   race.finishS = Infinity;
+  race.readyMe = false;
+  race.countdown = false;
   rivals.clear();
   traffic.setRemote(false);
   net.leave();
@@ -461,6 +482,7 @@ function endRaceCleanup() {
   hud.setLanesLabel(laneCount);
   hud.setBest(best);
   refreshLeaderboard();
+  updateCustomWarn();
 }
 
 function exitRaceToMenu() {
@@ -495,18 +517,44 @@ net.onMessage = (msg) => {
       race.players = msg.players;
       race.hostId = msg.hostId;
       race.isHost = msg.hostId === race.myId;
+      race.countdown = !!msg.countdown;
+      race.readyMe = !!race.players.find((p) => p.id === race.myId)?.ready;
       hud.setRaceStatus('КОМНАТА: ' + msg.code);
       hud.renderRacePlayers(msg.players, msg.hostId, race.myId);
+      hud.setReady(race.readyMe, race.countdown);
       hud.setRaceUi(msg.hostId === race.myId ? 'lobby-host' : 'lobby-guest');
+      if (race.isHost) net.cfg(raceMode, laneCount, trafficCount); // настройки заезда от хоста
       break;
     case 'lobby':
       race.players = msg.players;
       race.hostId = msg.hostId;
       race.isHost = msg.hostId === race.myId;
+      if (race.countdown && !msg.countdown) {
+        // Отсчёт отменили (кто-то вышел) — возвращаем кнопку.
+        race.countdown = false;
+        hud.setMsg('');
+      }
+      const meNow = race.players.find((p) => p.id === race.myId);
+      race.readyMe = !!(meNow && meNow.ready);
       hud.renderRacePlayers(msg.players, msg.hostId, race.myId);
+      hud.setReady(race.readyMe, race.countdown);
       hud.setRaceStatus((race.inLobby ? 'КОМНАТА: ' + race.code + ' · ' : '') + 'ИГРОКОВ: ' + msg.players.length);
       hud.setRaceUi(race.inLobby ? (race.isHost ? 'lobby-host' : 'lobby-guest') : 'menu');
       break;
+    case 'countdown': {
+      // Все готовы — показываем отсчёт, сервер стартует через ~3 сек.
+      race.countdown = true;
+      hud.setReady(race.readyMe, true);
+      hud.setMsg('СТАРТ ЧЕРЕЗ 3');
+      let n = 3;
+      const tick = () => {
+        if (!race.countdown) return; // отсчёт отменили
+        n--;
+        if (n > 0) { hud.setMsg('СТАРТ ЧЕРЕЗ ' + n); setTimeout(tick, 1000); }
+      };
+      setTimeout(tick, 1000);
+      break;
+    }
     case 'error':
       hud.setRaceStatus('ОШИБКА: ' + msg.msg);
       break;
@@ -617,7 +665,7 @@ function gameOver(reason) {
     race.crashed.add(race.myId);
     net.crash(metric);
     hud.renderRacePlayers(race.players, race.hostId, race.myId, raceDoneSet());
-  } else {
+  } else if (runStandard) {
     const isRecord = metric > best;
     if (isRecord) {
       best = metric;
@@ -627,6 +675,9 @@ function gameOver(reason) {
       hud.toast('НОВЫЙ РЕКОРД: ' + metric);
     }
     submitScore(myNick, metric);
+  } else {
+    // Трафик/полосы менялись — результат в общую таблицу не идёт.
+    hud.toast('РЕЗУЛЬТАТ НЕ УЧТЁН — НАСТРОЙКИ НЕ СТАНДАРТНЫЕ');
   }
 }
 
@@ -643,6 +694,8 @@ function adjustLanes(d) {
     hud.setMode(mode, true);
   }
   hud.setLanesLabel(laneCount);
+  updateCustomWarn();
+  if (race.inLobby && race.isHost) net.cfg(raceMode, laneCount, trafficCount);
 }
 
 function adjustTraffic(d) {
@@ -652,6 +705,8 @@ function adjustTraffic(d) {
   traffic.effCount = trafficCount;
   hud.setTrafficLabel(trafficCount);
   hud.setLanesLabel(laneCount);
+  updateCustomWarn();
+  if (race.inLobby && race.isHost) net.cfg(raceMode, laneCount, trafficCount);
 }
 
 // Сброс к стандартной конфигурации: трафик 14, полосы 4, бесконечный режим.
@@ -672,6 +727,8 @@ function applyStandard() {
   }
   hud.setTrafficLabel(trafficCount);
   hud.setLanesLabel(laneCount);
+  updateCustomWarn();
+  if (race.inLobby && race.isHost) net.cfg(raceMode, laneCount, trafficCount);
 }
 
 // Захват курсора: прячет системный курсор, движение мыши не упирается в края экрана.
@@ -824,7 +881,7 @@ hud.el.nickInput.addEventListener('keydown', (e) => {
 });
 hud.el.authLogin.addEventListener('click', () => {
   const nick = hud.el.nickInput.value.trim();
-  if (!nick) { hud.setAuthStatus('ВПИШИ НИК ИЛИ НАЖМИ «ИГРАТЬ БЕЗ РЕЙТИНГА»'); return; }
+  if (nick.length < 2 || nick.length > 15) { hud.setAuthStatus('НИК: ОТ 2 ДО 15 СИМВОЛОВ'); return; }
   hud.setAuthStatus('ПРОВЕРЯЕМ...');
   fetch('/api/login', {
     method: 'POST',
@@ -918,9 +975,7 @@ document.getElementById('race-join').addEventListener('click', () => {
     hud.setRaceStatus('ПОДКЛЮЧЕНИЕ К ' + code + '...');
   }
 });
-document.getElementById('race-start').addEventListener('click', () => {
-  if (race.isHost && race.inLobby) net.start(laneCount, trafficCount, raceMode);
-});
+// Кнопку «СТАРТ ГОНКИ» заменила «ГОТОВ» — стартует отсчёт, когда готовы все.
 
 // --- Режим сетевой гонки: бесконечная / на время ---
 let raceMode = loadSetting('rushhour_racemode', 'endless') === 'timed' ? 'timed' : 'endless';
@@ -928,10 +983,19 @@ const setRaceMode = (m) => {
   raceMode = m;
   localStorage.setItem('rushhour_racemode', m);
   hud.setRaceMode(m);
+  if (race.inLobby && race.isHost) net.cfg(raceMode, laneCount, trafficCount);
 };
 hud.setRaceMode(raceMode);
 hud.el.raceModeEndless.addEventListener('click', () => setRaceMode('endless'));
 hud.el.raceModeTimed.addEventListener('click', () => setRaceMode('timed'));
+
+// Кнопка «ГОТОВ»: когда готовы все — сервер даёт отсчёт 3..1 и старт.
+hud.el.raceReady.addEventListener('click', () => {
+  if (!race.inLobby || race.countdown || race.active) return;
+  race.readyMe = !race.readyMe;
+  hud.setReady(race.readyMe, false);
+  net.ready(race.readyMe);
+});
 
 document.getElementById('ghost-toggle').addEventListener('click', () => {
   settings.ghostOn = !settings.ghostOn;
@@ -1163,6 +1227,7 @@ resetWorld(seed);
 hud.setMode(mode, true);
 hud.setTrafficLabel(trafficCount);
 hud.setLanesLabel(laneCount);
+updateCustomWarn();
 hud.updateMenuLabels(settings);
 hud.renderLeaderboard([], null);
 refreshLeaderboard();

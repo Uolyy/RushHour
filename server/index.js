@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
+const TRAFFIC_DEFAULT = 14; // стандартная плотность трафика
 
 // Лог в файл: data/server.log — чтобы причину падения можно было прислать.
 const dataDir = path.join(__dirname, '..', 'data');
@@ -68,7 +69,7 @@ const qLeaderboard = db.prepare(`
   FROM scores s JOIN players p ON p.id = s.player_id
   GROUP BY s.player_id ORDER BY score DESC LIMIT 10`);
 
-const NICK_RE = /^[\p{L}\p{N}_ -]{2,16}$/u;
+const NICK_RE = /^[\p{L}\p{N}_ -]{2,15}$/u;
 function normNick(raw) {
   return String(raw ?? '').trim().replace(/\s+/g, ' ');
 }
@@ -80,7 +81,7 @@ app.use(express.json());
 app.post('/api/login', (req, res) => {
   const nick = normNick(req.body?.nick);
   if (!NICK_RE.test(nick)) {
-    return res.status(400).json({ error: 'Ник: 2–16 символов, буквы/цифры/пробел/дефис' });
+    return res.status(400).json({ error: 'Ник: 2–15 символов, буквы/цифры/пробел/дефис' });
   }
   let p = qPlayerByName.get(nick);
   if (!p) {
@@ -150,7 +151,8 @@ function lobbyMsg(room) {
     t: 'lobby',
     code: room.code,
     hostId: room.host.id,
-    players: [...room.players].map((p) => ({ id: p.id, nick: p.nick, host: p === room.host })),
+    countdown: !!room.countdown,
+    players: [...room.players].map((p) => ({ id: p.id, nick: p.nick, host: p === room.host, ready: !!p.ready })),
   };
 }
 function broadcast(room, msg, exceptWs = null) {
@@ -160,12 +162,32 @@ function broadcast(room, msg, exceptWs = null) {
   }
 }
 function closeRoom(room, why) {
+  if (room.countdownTimer) { clearTimeout(room.countdownTimer); room.countdownTimer = null; }
   broadcast(room, { t: 'aborted', msg: why || '' });
   for (const p of room.players) {
     p.ws.raceRoom = null;
     try { p.ws.close(); } catch { /* */ }
   }
   rooms.delete(room.code);
+}
+
+// Все нажали «ГОТОВ» — отсчёт 3..1, затем старт с настройками хоста.
+function beginCountdown(room) {
+  room.countdown = true;
+  broadcast(room, { t: 'countdown' });
+  room.countdownTimer = setTimeout(() => {
+    room.countdownTimer = null;
+    if (!rooms.has(room.code) || !room.countdown || room.started) return;
+    room.started = true;
+    const cfg = room.cfg || {};
+    broadcast(room, {
+      t: 'started',
+      seed: room.seed,
+      mode: cfg.mode === 'timed' ? 'timed' : 'endless',
+      lanes: Math.min(6, Math.max(2, Math.floor(Number(cfg.lanes) || 4))),
+      traffic: Math.min(30, Math.max(0, Math.floor(Number(cfg.traffic) || TRAFFIC_DEFAULT))),
+    });
+  }, 3200);
 }
 
 // Все доехали до финиша или выбыли — рассылаем таблицу результатов и закрываем комнату.
@@ -197,8 +219,8 @@ wss.on('connection', (ws) => {
         if (room) return;
         const code = makeCode();
         if (!code) return ws.send(JSON.stringify({ t: 'error', msg: 'Нет свободных кодов' }));
-        const r = { code, host: null, players: [], started: false, seed: (Math.random() * 1e9) | 0 };
-        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, score: 0 };
+        const r = { code, host: null, players: [], started: false, countdown: false, countdownTimer: null, cfg: null, seed: (Math.random() * 1e9) | 0 };
+        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, ready: false, score: 0 };
         r.host = player;
         r.players.push(player);
         rooms.set(code, r);
@@ -210,11 +232,12 @@ wss.on('connection', (ws) => {
       case 'join': {
         if (room) return;
         const r = rooms.get(String(msg.code || '').toUpperCase());
-        if (!r || r.players.length >= 6) {
-          return ws.send(JSON.stringify({ t: 'error', msg: 'Комната не найдена или полна' }));
+        if (!r || r.players.length >= 4) {
+          return ws.send(JSON.stringify({ t: 'error', msg: 'Комната не найдена или полна (до 4 игроков)' }));
         }
         if (r.started) return ws.send(JSON.stringify({ t: 'error', msg: 'Гонка уже началась' }));
-        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, score: 0 };
+        if (r.countdown) return ws.send(JSON.stringify({ t: 'error', msg: 'Идёт отсчёт — гонка уже начинается' }));
+        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, ready: false, score: 0 };
         r.players.push(player);
         ws.raceRoom = r;
         ws.racePlayer = player;
@@ -222,16 +245,21 @@ wss.on('connection', (ws) => {
         broadcast(r, lobbyMsg(r), ws);
         break;
       }
-      case 'start': {
-        if (!room || me !== room.host || room.started) return;
-        room.started = true;
-        broadcast(room, {
-          t: 'started',
-          seed: room.seed,
+      case 'cfg': {
+        // Хост сообщает настройки заезда (режим/полосы/трафик); применятся на старте.
+        if (!room || me !== room.host || room.started || room.countdown) return;
+        room.cfg = {
           mode: msg.mode === 'timed' ? 'timed' : 'endless',
           lanes: Math.min(6, Math.max(2, Math.floor(Number(msg.lanes) || 4))),
-          traffic: Math.min(30, Math.max(0, Math.floor(Number(msg.traffic) || 16))),
-        });
+          traffic: Math.min(30, Math.max(0, Math.floor(Number(msg.traffic) || TRAFFIC_DEFAULT))),
+        };
+        break;
+      }
+      case 'ready': {
+        if (!room || room.started || room.countdown || !me) return;
+        me.ready = !!msg.val;
+        broadcast(room, lobbyMsg(room));
+        if (room.players.every((p) => p.ready)) beginCountdown(room);
         break;
       }
       case 'state': {
@@ -292,6 +320,10 @@ function removeFromRoom(room, me) {
       return;
     }
     if (checkRaceOver(room)) return;
+  } else if (room.countdown) {
+    // Ушли во время отсчёта — откатываем комнату в лобби.
+    if (room.countdownTimer) { clearTimeout(room.countdownTimer); room.countdownTimer = null; }
+    room.countdown = false;
   }
   if (wasHost) room.host = room.players[0];
   broadcast(room, lobbyMsg(room));
