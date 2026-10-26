@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
@@ -113,6 +114,23 @@ app.post('/api/scores', (req, res) => {
 
 app.get('/api/leaderboard', (req, res) => {
   res.json({ rows: qLeaderboard.all() });
+});
+
+// ---------- Обновление по кнопке «ПРОВЕРИТЬ ИЗМЕНЕНИЯ» ----------
+let updating = false; // единовременный запуск, сбрасывается по таймауту ниже
+
+app.post('/api/update', (req, res) => {
+  if (updating) return res.status(409).json({ ok: false, error: 'Обновление уже идёт' });
+  updating = true;
+  setTimeout(() => { updating = false; }, 5 * 60 * 1000); // страховка: скрипт упал без рестарта
+  const child = spawn('bash', [path.join(__dirname, '..', 'deploy', 'update.sh')], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref(); // скрипт живёт отдельно: переживает рестарт сервера в конце
+  child.on('error', (e) => { updating = false; LOG('update spawn error: ' + (e && e.message)); });
+  LOG('update triggered via POST /api/update');
+  res.json({ ok: true, started: true });
 });
 
 // ---------- Комнаты гонок ----------

@@ -888,6 +888,21 @@ document.getElementById('race-create').addEventListener('click', () => {
   net.create(myNick);
   hud.setRaceStatus('СОЗДАЁМ КОМНАТУ...');
 });
+document.getElementById('check-btn').addEventListener('click', async () => {
+  const btn = document.getElementById('check-btn');
+  if (btn.dataset.busy) return;
+  btn.dataset.busy = '1';
+  btn.textContent = 'ОБНОВЛЯЮ...';
+  try {
+    const r = await fetch('/api/update', { method: 'POST' });
+    if (r.ok) btn.textContent = 'ОБНОВЛЯЮ... ПЕРЕЗАГРУЗИ СТРАНИЦУ ЧЕРЕЗ МИНУТУ';
+    else if (r.status === 409) { btn.textContent = 'ОБНОВЛЕНИЕ УЖЕ ИДЁТ'; delete btn.dataset.busy; }
+    else { btn.textContent = 'ОШИБКА ОБНОВЛЕНИЯ'; delete btn.dataset.busy; }
+  } catch {
+    btn.textContent = 'ОШИБКА ОБНОВЛЕНИЯ';
+    delete btn.dataset.busy;
+  }
+});
 document.getElementById('race-join').addEventListener('click', () => {
   const row = hud.el.raceCodeRow;
   if (row.style.display === 'none' || !row.style.display) {
