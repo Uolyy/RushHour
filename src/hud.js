@@ -40,6 +40,7 @@ export class HUD {
       raceModeTimed: document.getElementById('race-mode-timed'),
       readyRow: document.getElementById('ready-row'),
       raceReady: document.getElementById('race-ready'),
+      raceCopy: document.getElementById('race-copy'),
       customWarn: document.getElementById('custom-warn'),
       raceCodeRow: document.getElementById('race-code-row'),
       raceCode: document.getElementById('race-code'),
@@ -188,6 +189,7 @@ export class HUD {
     this.el.raceStartRow.style.display = inLobby ? 'flex' : 'none';
     // Выбор режима — только у хоста и только в созданной им комнате.
     this.el.raceModeRow.style.display = mode === 'lobby-host' ? 'flex' : 'none';
+    this.el.raceCopy.style.display = inLobby ? 'block' : 'none';
     this.setPlayVisible(!this.authOpen);
     this.setPlayLabel(inLobby ? 'ВЫЙТИ ИЗ КОМНАТЫ' : 'ИГРАТЬ');
   }

@@ -137,6 +137,7 @@
     #check-btn:hover { opacity: 1; }
     .menu-cell:disabled { opacity: .45; cursor: default; }
     #race-players .ready::after { content: ' ✔'; color: #7fdc7f; }
+    #race-copy { width: auto; padding: 6px 12px; font-size: 11px; letter-spacing: 2px; }
     #custom-warn {
       position: fixed; left: 14px; top: 50%; transform: translateY(-50%);
       writing-mode: vertical-rl; pointer-events: none;
@@ -227,9 +228,7 @@
             </div>
             <div id="race-status"></div>
             <div id="race-players"></div>
-            <div class="menu-row" id="ready-row" style="display:none">
-              <button class="menu-cell" id="race-ready" style="width:200px">ГОТОВ</button>
-            </div>
+            <button class="menu-cell" id="race-copy" style="display:none">КОПИРОВАТЬ КОД</button>
           </div>
           <div id="settings-row">
             <button class="menu-cell" id="ghost-toggle">ПРИЗРАК: ВЫКЛ</button>
@@ -239,6 +238,9 @@
             <span id="volume-label" class="menu-mid">ГРОМКОСТЬ: 6</span>
             <button class="menu-btn" id="volume-plus">+</button>
           </div>
+        </div>
+        <div class="menu-row" id="ready-row" style="display:none">
+          <button class="menu-cell" id="race-ready" style="width:200px">ГОТОВ</button>
         </div>
         <div class="menu-row" id="over-buttons" style="display:none">
           <button class="menu-cell" id="over-restart" style="width:170px">ЗАНОВО</button>

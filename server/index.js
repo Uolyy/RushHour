@@ -151,7 +151,6 @@ function lobbyMsg(room) {
     t: 'lobby',
     code: room.code,
     hostId: room.host.id,
-    countdown: !!room.countdown,
     players: [...room.players].map((p) => ({ id: p.id, nick: p.nick, host: p === room.host, ready: !!p.ready })),
   };
 }
@@ -162,7 +161,7 @@ function broadcast(room, msg, exceptWs = null) {
   }
 }
 function closeRoom(room, why) {
-  if (room.countdownTimer) { clearTimeout(room.countdownTimer); room.countdownTimer = null; }
+  if (room.goTimer) { clearTimeout(room.goTimer); room.goTimer = null; }
   broadcast(room, { t: 'aborted', msg: why || '' });
   for (const p of room.players) {
     p.ws.raceRoom = null;
@@ -171,23 +170,29 @@ function closeRoom(room, why) {
   rooms.delete(room.code);
 }
 
-// Все нажали «ГОТОВ» — отсчёт 3..1, затем старт с настройками хоста.
-function beginCountdown(room) {
-  room.countdown = true;
+// Все в лобби нажали «ГОТОВ» — грузим всех на трассу (на стартовую решётку).
+function startRace(room) {
+  room.started = true;
+  const cfg = room.cfg || {};
+  broadcast(room, {
+    t: 'started',
+    seed: room.seed,
+    mode: cfg.mode === 'timed' ? 'timed' : 'endless',
+    lanes: Math.min(6, Math.max(2, Math.floor(Number(cfg.lanes) || 4))),
+    traffic: Math.min(30, Math.max(0, Math.floor(Number(cfg.traffic) || TRAFFIC_DEFAULT))),
+  });
+}
+
+// На решётке все нажали «ГОТОВ» — отсчёт 5 секунд, машины стоят, затем «ПОЕХАЛИ!».
+function beginGridCountdown(room) {
+  room.gridCountdown = true;
   broadcast(room, { t: 'countdown' });
-  room.countdownTimer = setTimeout(() => {
-    room.countdownTimer = null;
-    if (!rooms.has(room.code) || !room.countdown || room.started) return;
-    room.started = true;
-    const cfg = room.cfg || {};
-    broadcast(room, {
-      t: 'started',
-      seed: room.seed,
-      mode: cfg.mode === 'timed' ? 'timed' : 'endless',
-      lanes: Math.min(6, Math.max(2, Math.floor(Number(cfg.lanes) || 4))),
-      traffic: Math.min(30, Math.max(0, Math.floor(Number(cfg.traffic) || TRAFFIC_DEFAULT))),
-    });
-  }, 3200);
+  room.goTimer = setTimeout(() => {
+    room.goTimer = null;
+    if (!rooms.has(room.code) || !room.gridCountdown) return;
+    room.gridCountdown = false;
+    broadcast(room, { t: 'go' });
+  }, 5000);
 }
 
 // Все доехали до финиша или выбыли — рассылаем таблицу результатов и закрываем комнату.
@@ -219,8 +224,8 @@ wss.on('connection', (ws) => {
         if (room) return;
         const code = makeCode();
         if (!code) return ws.send(JSON.stringify({ t: 'error', msg: 'Нет свободных кодов' }));
-        const r = { code, host: null, players: [], started: false, countdown: false, countdownTimer: null, cfg: null, seed: (Math.random() * 1e9) | 0 };
-        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, ready: false, score: 0 };
+        const r = { code, host: null, players: [], started: false, gridCountdown: false, goTimer: null, cfg: null, seed: (Math.random() * 1e9) | 0 };
+        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, ready: false, ready2: false, score: 0 };
         r.host = player;
         r.players.push(player);
         rooms.set(code, r);
@@ -237,7 +242,7 @@ wss.on('connection', (ws) => {
         }
         if (r.started) return ws.send(JSON.stringify({ t: 'error', msg: 'Гонка уже началась' }));
         if (r.countdown) return ws.send(JSON.stringify({ t: 'error', msg: 'Идёт отсчёт — гонка уже начинается' }));
-        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, ready: false, score: 0 };
+        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, ready: false, ready2: false, score: 0 };
         r.players.push(player);
         ws.raceRoom = r;
         ws.racePlayer = player;
@@ -247,7 +252,7 @@ wss.on('connection', (ws) => {
       }
       case 'cfg': {
         // Хост сообщает настройки заезда (режим/полосы/трафик); применятся на старте.
-        if (!room || me !== room.host || room.started || room.countdown) return;
+        if (!room || me !== room.host || room.started || room.gridCountdown) return;
         room.cfg = {
           mode: msg.mode === 'timed' ? 'timed' : 'endless',
           lanes: Math.min(6, Math.max(2, Math.floor(Number(msg.lanes) || 4))),
@@ -256,10 +261,18 @@ wss.on('connection', (ws) => {
         break;
       }
       case 'ready': {
-        if (!room || room.started || room.countdown || !me) return;
+        if (!room || room.started || !me) return;
         me.ready = !!msg.val;
         broadcast(room, lobbyMsg(room));
-        if (room.players.every((p) => p.ready)) beginCountdown(room);
+        if (room.players.every((p) => p.ready)) startRace(room);
+        break;
+      }
+      case 'ready2': {
+        // Подтверждение готовности уже НА РЕШЁТКЕ: все готовы — отсчёт 5 секунд.
+        if (!room || !room.started || room.gridCountdown || !me) return;
+        me.ready2 = !!msg.val;
+        broadcast(room, { t: 'ready2', players: room.players.map((p) => ({ id: p.id, ready2: !!p.ready2 })) });
+        if (room.players.every((p) => p.ready2)) beginGridCountdown(room);
         break;
       }
       case 'state': {
@@ -319,11 +332,16 @@ function removeFromRoom(room, me) {
       closeRoom(room, 'Хост вышел из гонки');
       return;
     }
+    if (room.gridCountdown) {
+      // Ушли во время отсчёта — откатываемся к кнопке «ГОТОВ» на решётке.
+      if (room.goTimer) { clearTimeout(room.goTimer); room.goTimer = null; }
+      room.gridCountdown = false;
+    }
+    broadcast(room, { t: 'ready2', players: room.players.map((p) => ({ id: p.id, ready2: !!p.ready2 })) });
     if (checkRaceOver(room)) return;
-  } else if (room.countdown) {
-    // Ушли во время отсчёта — откатываем комнату в лобби.
-    if (room.countdownTimer) { clearTimeout(room.countdownTimer); room.countdownTimer = null; }
-    room.countdown = false;
+  } else {
+    // Лобби в меню: если после выхода готовы все оставшиеся — сразу грузим трассу.
+    if (room.players.every((p) => p.ready)) startRace(room);
   }
   if (wasHost) room.host = room.players[0];
   broadcast(room, lobbyMsg(room));

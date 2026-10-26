@@ -15,6 +15,10 @@ export class SkyDome {
       sunColor: { value: new THREE.Color('#ffd9a8') },
       sunSize: { value: 0.05 },
       sunGlow: { value: 0.4 },
+      moonDir: { value: new THREE.Vector3(0, 0.8, 0.6).normalize() },
+      moonColor: { value: new THREE.Color('#cdd9ff') },
+      moonSize: { value: 0.06 },
+      moonGlow: { value: 0.22 },
     };
     this.mesh = new THREE.Mesh(
       new THREE.SphereGeometry(1600, 32, 16),
@@ -37,6 +41,10 @@ export class SkyDome {
           'uniform vec3 sunColor;',
           'uniform float sunSize;',
           'uniform float sunGlow;',
+          'uniform vec3 moonDir;',
+          'uniform vec3 moonColor;',
+          'uniform float moonSize;',
+          'uniform float moonGlow;',
           'varying vec3 vP;',
           'void main() {',
           '  vec3 dir = normalize(vP);',
@@ -46,6 +54,10 @@ export class SkyDome {
           '  float disk = smoothstep(sunSize, sunSize * 0.72, ang);',
           '  float glow = pow(max(0.0, 1.0 - ang / (sunSize * 6.0 + 0.001)), 3.0) * sunGlow;',
           '  col = mix(col, sunColor, clamp(disk + glow, 0.0, 1.0));',
+          '  float mang = acos(clamp(dot(dir, normalize(moonDir)), -1.0, 1.0));',
+          '  float mdisk = smoothstep(moonSize, moonSize * 0.7, mang);',
+          '  float mglow = pow(max(0.0, 1.0 - mang / (moonSize * 5.0 + 0.001)), 3.0) * moonGlow;',
+          '  col = mix(col, moonColor, clamp(mdisk + mglow, 0.0, 1.0));',
           '  gl_FragColor = vec4(col, 1.0);',
           '}',
         ].join('\n'),
@@ -89,6 +101,14 @@ export class SkyDome {
       Math.sin(p.sunEl),
       Math.sin(p.sunAz) * Math.cos(p.sunEl)
     ).normalize();
+    u.moonDir.value.set(
+      Math.cos(p.moonAz) * Math.cos(p.moonEl),
+      Math.sin(p.moonEl),
+      Math.sin(p.moonAz) * Math.cos(p.moonEl)
+    ).normalize();
+    u.moonColor.value.copy(p.moonColor);
+    u.moonSize.value = p.moonSize;
+    u.moonGlow.value = p.moonGlow * Math.min(1, Math.max(0, p.moonI));
     this.stars.material.opacity = p.stars * 0.9;
     this.stars.visible = p.stars > 0.02;
   }
