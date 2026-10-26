@@ -151,7 +151,7 @@ function lobbyMsg(room) {
     t: 'lobby',
     code: room.code,
     hostId: room.host.id,
-    players: [...room.players].map((p) => ({ id: p.id, nick: p.nick, host: p === room.host, ready: !!p.ready })),
+    players: [...room.players].map((p) => ({ id: p.id, nick: p.nick, host: p === room.host })),
   };
 }
 function broadcast(room, msg, exceptWs = null) {
@@ -225,7 +225,7 @@ wss.on('connection', (ws) => {
         const code = makeCode();
         if (!code) return ws.send(JSON.stringify({ t: 'error', msg: 'Нет свободных кодов' }));
         const r = { code, host: null, players: [], started: false, gridCountdown: false, goTimer: null, cfg: null, seed: (Math.random() * 1e9) | 0 };
-        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, ready: false, ready2: false, score: 0 };
+        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, ready2: false, score: 0 };
         r.host = player;
         r.players.push(player);
         rooms.set(code, r);
@@ -242,7 +242,7 @@ wss.on('connection', (ws) => {
         }
         if (r.started) return ws.send(JSON.stringify({ t: 'error', msg: 'Гонка уже началась' }));
         if (r.countdown) return ws.send(JSON.stringify({ t: 'error', msg: 'Идёт отсчёт — гонка уже начинается' }));
-        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, ready: false, ready2: false, score: 0 };
+        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, ready2: false, score: 0 };
         r.players.push(player);
         ws.raceRoom = r;
         ws.racePlayer = player;
@@ -260,11 +260,10 @@ wss.on('connection', (ws) => {
         };
         break;
       }
-      case 'ready': {
-        if (!room || room.started || !me) return;
-        me.ready = !!msg.val;
-        broadcast(room, lobbyMsg(room));
-        if (room.players.every((p) => p.ready)) startRace(room);
+      case 'launch': {
+        // Хост нажал «ИГРАТЬ» — грузим всех на стартовую решётку.
+        if (!room || me !== room.host || room.started) return;
+        startRace(room);
         break;
       }
       case 'ready2': {
@@ -339,9 +338,6 @@ function removeFromRoom(room, me) {
     }
     broadcast(room, { t: 'ready2', players: room.players.map((p) => ({ id: p.id, ready2: !!p.ready2 })) });
     if (checkRaceOver(room)) return;
-  } else {
-    // Лобби в меню: если после выхода готовы все оставшиеся — сразу грузим трассу.
-    if (room.players.every((p) => p.ready)) startRace(room);
   }
   if (wasHost) room.host = room.players[0];
   broadcast(room, lobbyMsg(room));

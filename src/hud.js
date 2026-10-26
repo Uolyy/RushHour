@@ -38,16 +38,16 @@ export class HUD {
       raceModeRow: document.getElementById('race-mode-row'),
       raceModeEndless: document.getElementById('race-mode-endless'),
       raceModeTimed: document.getElementById('race-mode-timed'),
-      readyRow: document.getElementById('ready-row'),
-      raceReady: document.getElementById('race-ready'),
+      launchRow: document.getElementById('launch-row'),
+      raceLaunch: document.getElementById('race-launch'),
+      gridReadyRow: document.getElementById('grid-ready-row'),
+      gridReadyBtn: document.getElementById('grid-ready'),
       raceCopy: document.getElementById('race-copy'),
       customWarn: document.getElementById('custom-warn'),
       raceCodeRow: document.getElementById('race-code-row'),
       raceCode: document.getElementById('race-code'),
       raceStatus: document.getElementById('race-status'),
       racePlayers: document.getElementById('race-players'),
-      raceStartRow: document.getElementById('ready-row'),
-      raceStart: document.getElementById('race-ready'),
     };
   }
 
@@ -177,27 +177,28 @@ export class HUD {
       const cls = [];
       if (p.id === hostId) cls.push('host');
       if (doneIds && doneIds.has(p.id)) cls.push('dead');
-      if (p.ready) cls.push('ready'); // галочка готовности в лобби
       const me = p.id === myId ? ' (ТЫ)' : '';
       return `<div class="${cls.join(' ')}">${escapeHtml(p.nick)}${me}</div>`;
     }).join('');
   }
 
   setRaceUi(mode) {
-    // mode: 'menu' | 'lobby-host' | 'lobby-guest'
-    const inLobby = mode !== 'menu';
-    this.el.raceStartRow.style.display = inLobby ? 'flex' : 'none';
+    // mode: 'menu' | 'lobby-host' | 'lobby-guest' | 'grid'
+    const inLobby = mode === 'lobby-host' || mode === 'lobby-guest';
+    // «ИГРАТЬ» на трассу — только у хоста в лобби; «ГОТОВ» — только на решётке.
+    this.el.launchRow.style.display = mode === 'lobby-host' ? 'flex' : 'none';
+    this.el.gridReadyRow.style.display = mode === 'grid' ? 'flex' : 'none';
     // Выбор режима — только у хоста и только в созданной им комнате.
     this.el.raceModeRow.style.display = mode === 'lobby-host' ? 'flex' : 'none';
-    this.el.raceCopy.style.display = inLobby ? 'block' : 'none';
+    this.el.raceCopy.style.display = inLobby ? 'inline-block' : 'none';
     this.setPlayVisible(!this.authOpen);
     this.setPlayLabel(inLobby ? 'ВЫЙТИ ИЗ КОМНАТЫ' : 'ИГРАТЬ');
   }
 
-  // Кнопка «ГОТОВ» в лобби; locked — во время отсчёта кнопка неактивна.
+  // Кнопка «ГОТОВ» на решётке; locked — во время отсчёта кнопка неактивна.
   setReady(ready, locked) {
-    this.el.raceStart.textContent = locked ? 'СТАРТ...' : (ready ? 'НЕ ГОТОВ' : 'ГОТОВ');
-    this.el.raceStart.disabled = !!locked;
+    this.el.gridReadyBtn.textContent = locked ? 'СТАРТ...' : (ready ? 'НЕ ГОТОВ' : 'ГОТОВ');
+    this.el.gridReadyBtn.disabled = !!locked;
   }
 
   // Боковое предупреждение: настройки отличаются от стандартных — рекорд не запишется.

@@ -71,17 +71,17 @@ const seed = (Math.random() * 1e9) | 0;
 const road = new Road(scene, seed);
 const biomes = new Biomes();
 road.setPalette(biomes.get(0));
-const LANES_KEY = 'rushhour_lanes';
-const savedLanes = localStorage.getItem(LANES_KEY);
-let laneCount = clamp(savedLanes !== null && Number.isFinite(Number(savedLanes)) ? Number(savedLanes) : 4, 2, 6);
+// Трафик и полосы не сохраняются между заходами: каждый вход начинается
+// со стандартных настроек (14 машин, 4 полосы).
+let laneCount = 4;
 road.setLaneCount(laneCount);
 const propPool = new PropPool(scene);
 const player = new Player(scene);
 const traffic = new Traffic(scene);
-const TRAFFIC_KEY = 'rushhour_traffic';
-const savedTraffic = localStorage.getItem(TRAFFIC_KEY);
-let trafficCount = clamp(savedTraffic !== null && Number.isFinite(Number(savedTraffic)) ? Number(savedTraffic) : TRAFFIC.COUNT, 0, TRAFFIC.MAX);
+let trafficCount = TRAFFIC.COUNT;
 traffic.setCount(trafficCount);
+localStorage.removeItem('rushhour_lanes');   // чистим старые сохранённые значения
+localStorage.removeItem('rushhour_traffic');
 
 // --- Эффекты и системы ---
 const postfx = new PostFX(renderer, scene, camera);
@@ -248,7 +248,6 @@ const race = {
   mode: 'endless',     // 'endless' | 'timed'
   finishS: Infinity,   // дистанция финиша (timed)
   milestone: 0,        // сколько подсказок «ФИНИШ ЧЕРЕЗ ...» уже показали
-  readyMe: false,      // нажал ли «ГОТОВ» в лобби
   gridReady: false,    // нажал ли «ГОТОВ» уже на стартовой решётке
   gridCountdown: false, // идёт отсчёт 5..1 на решётке (газ заблокирован)
   isHost: false,
@@ -408,7 +407,6 @@ function beginRace(cfg) {
   race.milestone = 0;
   race.mode = cfg.mode === 'timed' ? 'timed' : 'endless';
   race.finishS = race.mode === 'timed' ? RACE.LENGTH : Infinity;
-  race.readyMe = false;
   race.gridReady = false;
   race.gridCountdown = false;
   laneCount = cfg.lanes;
@@ -471,15 +469,14 @@ function endRaceCleanup() {
   race.milestone = 0;
   race.mode = 'endless';
   race.finishS = Infinity;
-  race.readyMe = false;
   race.gridReady = false;
   race.gridCountdown = false;
   rivals.clear();
   traffic.setRemote(false);
   net.leave();
   net.disconnect();
-  laneCount = clamp(Number(localStorage.getItem(LANES_KEY) ?? 4), 2, 6);
-  trafficCount = clamp(Number(localStorage.getItem(TRAFFIC_KEY) ?? TRAFFIC.COUNT), 0, TRAFFIC.MAX);
+  laneCount = 4;
+  trafficCount = TRAFFIC.COUNT;
   road.setLaneCount(laneCount);
   resetWorld(seed);
   traffic.setCount(trafficCount, player.s, road);
@@ -526,10 +523,8 @@ net.onMessage = (msg) => {
       race.players = msg.players;
       race.hostId = msg.hostId;
       race.isHost = msg.hostId === race.myId;
-      race.readyMe = !!race.players.find((p) => p.id === race.myId)?.ready;
-      hud.setRaceStatus('КОМНАТА: ' + msg.code);
+      hud.setRaceStatus('КОМНАТА: ' + msg.code + (race.isHost ? '' : ' · ЖДЁМ ХОСТА'));
       hud.renderRacePlayers(msg.players, msg.hostId, race.myId);
-      hud.setReady(race.readyMe, false);
       hud.setRaceUi(msg.hostId === race.myId ? 'lobby-host' : 'lobby-guest');
       if (race.isHost) net.cfg(raceMode, laneCount, trafficCount); // настройки заезда от хоста
       break;
@@ -541,10 +536,8 @@ net.onMessage = (msg) => {
         hud.renderRacePlayers(msg.players, msg.hostId, race.myId);
         break;
       }
-      race.readyMe = !!race.players.find((p) => p.id === race.myId)?.ready;
       hud.renderRacePlayers(msg.players, msg.hostId, race.myId);
-      hud.setReady(race.readyMe, false);
-      hud.setRaceStatus((race.inLobby ? 'КОМНАТА: ' + race.code + ' · ' : '') + 'ИГРОКОВ: ' + msg.players.length);
+      hud.setRaceStatus((race.inLobby ? 'КОМНАТА: ' + race.code + ' · ' : '') + 'ИГРОКОВ: ' + msg.players.length + (race.isHost ? '' : ' · ЖДЁМ ХОСТА'));
       hud.setRaceUi(race.inLobby ? (race.isHost ? 'lobby-host' : 'lobby-guest') : 'menu');
       break;
     case 'ready2': {
@@ -713,7 +706,6 @@ function gameOver(reason) {
 
 function adjustLanes(d) {
   laneCount = clamp(laneCount + d, 2, 6);
-  localStorage.setItem(LANES_KEY, String(laneCount));
   road.setLaneCount(laneCount);
   resetWorld((Math.random() * 1e9) | 0); // в меню — новая трасса под новую ширину
   if (state === 'pause') {
@@ -730,7 +722,6 @@ function adjustLanes(d) {
 
 function adjustTraffic(d) {
   trafficCount = clamp(trafficCount + d, 0, TRAFFIC.MAX);
-  localStorage.setItem(TRAFFIC_KEY, String(trafficCount));
   traffic.setCount(trafficCount, player.s, road);
   traffic.effCount = trafficCount;
   hud.setTrafficLabel(trafficCount);
@@ -743,8 +734,6 @@ function adjustTraffic(d) {
 function applyStandard() {
   trafficCount = 14;
   laneCount = 4;
-  localStorage.setItem(TRAFFIC_KEY, String(trafficCount));
-  localStorage.setItem(LANES_KEY, String(laneCount));
   traffic.setCount(trafficCount, player.s, road);
   traffic.effCount = trafficCount;
   road.setLaneCount(laneCount);
@@ -1024,20 +1013,20 @@ hud.setRaceMode(raceMode);
 hud.el.raceModeEndless.addEventListener('click', () => setRaceMode('endless'));
 hud.el.raceModeTimed.addEventListener('click', () => setRaceMode('timed'));
 
-// Кнопка «ГОТОВ»: в лобби собирает всех на трассу, на решётке запускает отсчёт 5..1.
-hud.el.raceReady.addEventListener('click', () => {
-  if (state === 'grid') {
-    if (race.gridCountdown) return;
-    race.gridReady = !race.gridReady;
-    hud.setReady(race.gridReady, false);
-    net.ready2(race.gridReady);
-    return;
-  }
-  if (!race.inLobby || race.active) return;
-  race.readyMe = !race.readyMe;
-  hud.setReady(race.readyMe, false);
-  net.ready(race.readyMe);
+// «ИГРАТЬ» у хоста в лобби: грузит всех на стартовую решётку.
+hud.el.raceLaunch.addEventListener('click', () => {
+  if (state !== 'menu' || !race.inLobby || !race.isHost || race.active) return;
+  net.launch();
 });
+
+// «ГОТОВ» на решётке: все подтвердили — отсчёт 5..1 и «ПОЕХАЛИ!».
+hud.el.gridReadyBtn.addEventListener('click', () => {
+  if (state !== 'grid' || race.gridCountdown) return;
+  race.gridReady = !race.gridReady;
+  hud.setReady(race.gridReady, false);
+  net.ready2(race.gridReady);
+});
+
 
 // Копирование кода комнаты в буфер обмена.
 hud.el.raceCopy.addEventListener('click', () => {

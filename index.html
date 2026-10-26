@@ -137,13 +137,13 @@
     #check-btn:hover { opacity: 1; }
     .menu-cell:disabled { opacity: .45; cursor: default; }
     #race-players .ready::after { content: ' ✔'; color: #7fdc7f; }
-    #race-copy { width: auto; padding: 6px 12px; font-size: 11px; letter-spacing: 2px; }
+    #race-status-row { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 16px; }
+    #race-copy { width: auto; padding: 5px 10px; font-size: 10px; letter-spacing: 1px; }
     #custom-warn {
-      position: fixed; left: 14px; top: 50%; transform: translateY(-50%);
-      writing-mode: vertical-rl; pointer-events: none;
-      font-size: 11px; font-weight: 700; letter-spacing: 2px; color: #ffd257;
-      text-shadow: 0 1px 8px rgba(0, 0, 0, .7);
-      max-height: 70vh; display: none;
+      display: none;
+      width: 100%; text-align: center;
+      font-size: 12px; font-weight: 700; letter-spacing: 1px; color: #ffd257;
+      text-shadow: 0 1px 8px rgba(0, 0, 0, .6);
     }
     @media (max-width: 1150px) {
       #menu-flex { flex-direction: column; align-items: center; gap: 20px; }
@@ -153,7 +153,6 @@
 </head>
 <body>
   <div id="vignette"></div>
-  <div id="custom-warn">РЕКОРД НЕ ЗАПИШЕТСЯ — ТРАФИК/ПОЛОСЫ ОТЛИЧАЮТСЯ ОТ СТАНДАРТА</div>
   <div id="hud">
     <div id="hud-score">
       <div class="label">SCORE</div>
@@ -210,6 +209,7 @@
             <span id="lanes-label" class="menu-mid">ПОЛОС: 4</span>
             <button class="menu-btn" id="lanes-plus">+</button>
           </div>
+          <div id="custom-warn">⚠ ОТЛИЧАЕТСЯ ОТ СТАНДАРТА — РЕКОРД НЕ ЗАПИШЕТСЯ</div>
           <div class="menu-row">
             <button class="menu-cell" id="standard-toggle">СТАНДАРТ</button>
           </div>
@@ -226,9 +226,14 @@
             <div class="menu-row" id="race-code-row" style="display:none">
               <input id="race-code" class="menu-input" maxlength="4" placeholder="КОД КОМНАТЫ" style="width:160px" />
             </div>
-            <div id="race-status"></div>
+            <div id="race-status-row">
+              <span id="race-status"></span>
+              <button class="menu-cell" id="race-copy" style="display:none">КОПИРОВАТЬ</button>
+            </div>
             <div id="race-players"></div>
-            <button class="menu-cell" id="race-copy" style="display:none">КОПИРОВАТЬ КОД</button>
+            <div class="menu-row" id="launch-row" style="display:none">
+              <button class="menu-cell" id="race-launch" style="width:200px">ИГРАТЬ</button>
+            </div>
           </div>
           <div id="settings-row">
             <button class="menu-cell" id="ghost-toggle">ПРИЗРАК: ВЫКЛ</button>
@@ -245,6 +250,9 @@
         <div class="menu-row" id="over-buttons" style="display:none">
           <button class="menu-cell" id="over-restart" style="width:170px">ЗАНОВО</button>
           <button class="menu-cell" id="over-menu" style="width:170px">В МЕНЮ</button>
+        </div>
+        <div class="menu-row" id="grid-ready-row" style="display:none">
+          <button class="menu-cell" id="grid-ready" style="width:200px">ГОТОВ</button>
         </div>
       </div>
     </div>
