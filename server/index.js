@@ -20,6 +20,7 @@ const ROUNDS_TOTAL = 3;
 const RACE_LENGTH_BASE = 2000; // дистанция финиша 1-го раунда (режим «на время»), м
 const ROUND_STEP = 2000;      // прибавка к дистанции финиша за раунд, м
 const NEXT_ROUND_DELAY = 7000; // пауза между раундами (показ результатов), мс
+const FINISH_GRACE_MS = 25000; // сколько ждём остальных после первого финиша, мс
 
 // Лог в файл: data/server.log — чтобы причину падения можно было прислать.
 const dataDir = path.join(__dirname, '..', 'data');
@@ -208,7 +209,9 @@ function resetRoomToLobby(room) {
   room.gridCountdown = false;
   if (room.goTimer) { clearTimeout(room.goTimer); room.goTimer = null; }
   if (room.pendingStart) { clearTimeout(room.pendingStart); room.pendingStart = null; }
+  if (room.finishGrace) { clearTimeout(room.finishGrace); room.finishGrace = null; }
   room.round = 0;
+  room.roundOver = false;
   room.wins = {};
   room.firstFinisher = null;
   room.lastCrashed = null;
@@ -228,8 +231,10 @@ function resetRoomToLobby(room) {
 function startRace(room) {
   if (room.round >= ROUNDS_TOTAL) { room.round = 0; room.wins = {}; } // серия кончилась — начинаем новую
   room.round++;
+  room.roundOver = false;
   room.firstFinisher = null;
   room.lastCrashed = null;
+  if (room.finishGrace) { clearTimeout(room.finishGrace); room.finishGrace = null; }
   for (const p of room.players) {
     p.crashed = false;
     p.finished = false;
@@ -271,8 +276,16 @@ function beginGridCountdown(room) {
 // комната возвращается в лобби, победитель серии объявляется по победным очкам.
 // Возвращает true, если гонка (раунд) завершена.
 function checkRaceOver(room) {
+  if (room.roundOver) return false; // раунд уже завершён — не завершаем второй раз
   if (!room.players.every((p) => p.crashed || p.finished)) return false;
-  const winnerId = (room.cfg && room.cfg.mode) === 'timed' ? room.firstFinisher : room.lastCrashed;
+  room.roundOver = true;
+  if (room.finishGrace) { clearTimeout(room.finishGrace); room.finishGrace = null; }
+  // Победное очко даём только при двух и более игроках: соло-доехавший
+  // после выхода соперников победы не получает.
+  const enough = room.players.length >= 2;
+  const winnerId = enough
+    ? ((room.cfg && room.cfg.mode) === 'timed' ? room.firstFinisher : room.lastCrashed)
+    : null;
   if (winnerId != null) room.wins[winnerId] = (room.wins[winnerId] || 0) + 1;
   const rows = [...room.players]
     .map((p) => ({ id: p.id, nick: p.nick, score: p.score, wins: room.wins[p.id] || 0, roundWin: p.id === winnerId }))
@@ -318,7 +331,7 @@ wss.on('connection', (ws) => {
         if (room) return;
         const code = makeCode();
         if (!code) return ws.send(JSON.stringify({ t: 'error', msg: 'Нет свободных кодов' }));
-        const r = { code, host: null, players: [], started: false, gridCountdown: false, goTimer: null, cfg: null, seed: (Math.random() * 1e9) | 0, round: 0, wins: {}, firstFinisher: null, lastCrashed: null, pendingStart: null };
+        const r = { code, host: null, players: [], started: false, gridCountdown: false, goTimer: null, cfg: null, seed: (Math.random() * 1e9) | 0, round: 0, wins: {}, firstFinisher: null, lastCrashed: null, pendingStart: null, roundOver: false, finishGrace: null };
         const player = {
           ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER',
           crashed: false, finished: false, ready2: false, score: 0,
@@ -409,7 +422,22 @@ wss.on('connection', (ws) => {
         if (!room || !room.started || !me || me.finished) return;
         me.finished = true;
         me.score = Math.floor(Number(msg.score) || 0);
-        if (room.firstFinisher == null) room.firstFinisher = me.id; // первый финишировавший — победитель раунда
+        if (room.firstFinisher == null) {
+          room.firstFinisher = me.id; // первый финишировавший — победитель раунда
+          // Не даём раунду зависнуть на «ждём остальных»: у остальных 25 с на
+          // то, чтобы доехать. Не успели — их текущий результат, раунд завершаем.
+          if ((room.cfg && room.cfg.mode) === 'timed' && !room.roundOver) {
+            if (room.finishGrace) clearTimeout(room.finishGrace);
+            room.finishGrace = setTimeout(() => {
+              room.finishGrace = null;
+              if (!rooms.has(room.code) || room.roundOver) return;
+              for (const p of room.players) {
+                if (!p.crashed && !p.finished) p.crashed = true;
+              }
+              checkRaceOver(room);
+            }, FINISH_GRACE_MS);
+          }
+        }
         broadcast(room, { t: 'finished', id: me.id }, ws);
         checkRaceOver(room);
         break;

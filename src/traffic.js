@@ -14,8 +14,10 @@ const KINDS = [
 ];
 const COLORS = ['#dcdcd8', '#b9b3a6', '#3d4f66', '#c9a13d', '#3f7a72', '#a84a3f', '#6b6f76', '#303239'];
 // Задержка отрисовки удалённого трафика: рисуем чуть позади свежего снапшота,
-// чтобы плавно интерполировать между пакетами (без рывков).
-const TRAFFIC_SNAP_DELAY = 0.12;
+// чтобы плавно интерполировать между пакетами (без рывков). Окно увеличено
+// против прежних 0.12 с — снапшоты с сети приходят рывками, и при коротком
+// окне боты дёргались.
+const TRAFFIC_SNAP_DELAY = 0.2;
 const SNAP_BUF_MAX = 16;     // размер буфера снапшотов на машину
 
 function pickKind() {
@@ -235,7 +237,7 @@ export class Traffic {
         } else {
           // Снапшотов не хватает — продолжаем движение по последней скорости.
           const last = b || a;
-          const age = Math.min(0.3, Math.max(0, renderT - last.t));
+          const age = Math.min(0.45, Math.max(0, renderT - last.t));
           s = last.s + last.v * age;
           lat = last.lat;
           v = last.v;

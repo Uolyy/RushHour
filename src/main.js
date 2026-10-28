@@ -728,7 +728,9 @@ net.onMessage = (msg) => {
       hud.setRaceUi(race.inLobby ? (race.isHost ? 'lobby-host' : 'lobby-guest') : 'menu');
       break;
     case 'ready2': {
-      if (!race.active) break;
+      // Обновления решётки важны только на решётке: посреди заезда (или на
+      // экране результатов) этот пакет не должен вываливать «ГОТОВЫ?» поверх гонки.
+      if (!race.active || state !== 'grid') break;
       const me = msg.players.find((p) => p.id === race.myId);
       race.gridReady = !!(me && me.ready2);
       const k = msg.players.filter((p) => p.ready2).length;
@@ -1062,8 +1064,12 @@ addEventListener('keydown', (e) => {
   if (state === 'menu' && !race.inLobby) startGame();
   else if (state === 'pause') resumeGame();
   else if (state === 'over' && overTimer > 0.9) {
-    if (race.active) exitRaceToMenu();
-    else if (e.code === 'KeyR' || e.code === 'Enter' || e.code === 'Space') restart();
+    // В сетевой гонке любые клавиши на экране аварии игнорируем: выход — только
+    // кнопкой «В МЕНЮ». Случайное нажатие раньше выкидывало из комнаты, и у
+    // остальных посреди заезда выскакивал оверлей решётки «ГОТОВЫ?».
+    if (!race.active) {
+      if (e.code === 'KeyR' || e.code === 'Enter' || e.code === 'Space') restart();
+    }
   }
 });
 addEventListener('pointermove', (e) => {
