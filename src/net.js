@@ -47,7 +47,10 @@ export class RaceNet {
   ready2(val) { this.send({ t: 'ready2', val }); }
   cfg(mode, lanes, traffic) { this.send({ t: 'cfg', mode, lanes, traffic }); }
   finish(score) { this.send({ t: 'finish', score }); }
-  state(s, lat, v) { this.send({ t: 'state', s, lat, v }); }
+  state(s, lat, v) {
+    // Округляем — короче JSON, меньше трафика, точности достаточно.
+    this.send({ t: 'state', s: Math.round(s * 100) / 100, lat: Math.round(lat * 100) / 100, v: Math.round(v * 10) / 10 });
+  }
   traffic(arr) { this.send({ t: 'traffic', arr }); }
   crash(score) { this.send({ t: 'crash', score }); }
   leave() { this.send({ t: 'leave' }); }

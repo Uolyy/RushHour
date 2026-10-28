@@ -21,6 +21,7 @@ const RACE_LENGTH_BASE = 2000; // дистанция финиша 1-го рау�
 const ROUND_STEP = 2000;      // прибавка к дистанции финиша за раунд, м
 const NEXT_ROUND_DELAY = 7000; // пауза между раундами (показ результатов), мс
 const FINISH_GRACE_MS = 25000; // сколько ждём остальных после первого финиша, мс
+const STATE_BROADCAST_MS = 25; // частота рассылки позиций игроков, мс (40 раз/с)
 
 // Лог в файл: data/server.log — чтобы причину падения можно было прислать.
 const dataDir = path.join(__dirname, '..', 'data');
@@ -316,7 +317,28 @@ function checkRaceOver(room) {
 
 const wss = new WebSocketServer({ noServer: true });
 
+// Ровный поток позиций: раз в STATE_BROADCAST_MS рассылаем по комнатам один
+// кадр со свежими позициями всех игроков. Клиенты шлют пакеты кто как успел,
+// а клиенты-получатели всегда получают кадры через равные промежутки — на них
+// и рассчитана интерполяция машин.
+setInterval(() => {
+  for (const room of rooms.values()) {
+    if (!room.started) continue;
+    const arr = [];
+    for (const p of room.players) {
+      if (p.lastState) arr.push({ id: p.id, s: p.lastState.s, lat: p.lastState.lat, v: p.lastState.v });
+    }
+    if (arr.length > 1) broadcast(room, { t: 'states', arr });
+  }
+}, STATE_BROADCAST_MS);
+
 wss.on('connection', (ws) => {
+  // Алгоритм Нейгла копит мелкие пакеты до полного TCP-пакета — это даёт
+  // задержки и бурсты до 40-200 мс. Для гонки нужна немедленная отправка.
+  if (ws._socket) {
+    ws._socket.setNoDelay(true);
+    ws._socket.setKeepAlive(true, 30000);
+  }
   ws.raceRoom = null;
   ws.racePlayer = null;
 
@@ -399,7 +421,10 @@ wss.on('connection', (ws) => {
       }
       case 'state': {
         if (!room || !room.started || !me) return;
-        broadcast(room, { t: 'state', id: me.id, s: +msg.s, lat: +msg.lat, v: +msg.v }, ws);
+        // Не пересылаем каждый пакет сразу: позиция копится, а рассылает её
+        // общий тик (см. STATE_BROADCAST_MS) одним кадром 'states' — поток
+        // пакетов к клиентам получается ровным, без бурстов и дрожания.
+        me.lastState = { s: +msg.s, lat: +msg.lat, v: +msg.v };
         break;
       }
       case 'traffic': {

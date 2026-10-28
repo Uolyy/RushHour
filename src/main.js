@@ -369,7 +369,7 @@ const race = {
 };
 // Все, кто закончил заезд (финишировал или разбился) — для списка игроков.
 const raceDoneSet = () => new Set([...race.crashed, ...race.finished]);
-let stateTimer = 0, trafficTimer = 0;
+let stateSenderId = 0, trafficSenderId = 0; // таймеры сетевой рассылки в заезде
 
 // --- Состояние партии ---
 let state = 'menu'; // menu | play | over | pause | grid | garage
@@ -538,6 +538,17 @@ function beginRace(cfg) {
     : Infinity;
   race.gridReady = false;
   race.gridCountdown = false;
+  // Сеть — по таймерам, а не от кадров рендера: кадровый цикл дёргается
+  // (лаги кадра, фон вкладки), из-за чего пакеты уходили рывками и чужие
+  // машины на приёмнике дёргались. Таймер даёт ровный поток.
+  clearInterval(stateSenderId);
+  clearInterval(trafficSenderId);
+  stateSenderId = setInterval(() => {
+    if (race.active && (state === 'play' || state === 'grid')) net.state(player.s, player.lat, player.speed);
+  }, Math.max(10, Math.round(NET.STATE_TICK * 1000)));
+  trafficSenderId = setInterval(() => {
+    if (race.active && race.isHost && (state === 'play' || state === 'grid')) net.traffic(traffic.snapshot());
+  }, Math.max(20, Math.round(NET.TRAFFIC_TICK * 1000)));
   laneCount = cfg.lanes;
   trafficCount = cfg.traffic;
   road.setLaneCount(laneCount);
@@ -587,8 +598,6 @@ function beginRace(cfg) {
   mouse.virt = 0;
   hud.setTrafficLabel(trafficCount);
   hud.setLanesLabel(laneCount);
-  stateTimer = 0;
-  trafficTimer = 0;
 }
 
 // Вернуть мир к обычной конфигурации после гонки.
@@ -606,6 +615,8 @@ function endRaceCleanup(keepRoom = false) {
   race.wins = {};
   race.gridReady = false;
   race.gridCountdown = false;
+  clearInterval(stateSenderId);
+  clearInterval(trafficSenderId);
   rivals.clear();
   traffic.setRemote(false);
   if (!keepRoom) {
@@ -774,7 +785,16 @@ net.onMessage = (msg) => {
       beginRace(msg);
       break;
     case 'state':
+      // Старый формат (пакет по одному) — оставлен для совместимости.
       if (race.active) rivals.setState(msg.id, msg.s, msg.lat, msg.v);
+      break;
+    case 'states':
+      // Агрегированный кадр с сервера: свежие позиции всех игроков разом.
+      if (race.active) {
+        for (const st of msg.arr || []) {
+          if (st.id !== race.myId) rivals.setState(st.id, st.s, st.lat, st.v);
+        }
+      }
       break;
     case 'traffic':
       if (race.active && !race.isHost) traffic.applySnapshot(msg.arr);
@@ -1379,14 +1399,8 @@ function stepPlay(dt) {
   score += player.speed * dt;
   runTime += dt; // время заезда — для таблицы рекордов
 
-  // --- Сетевая гонка: рассылка состояния, снапшоты трафика, соперники ---
+  // --- Сетевая гонка: рассылка по таймерам (см. beginRace), соперники ---
   if (race.active) {
-    stateTimer += dt;
-    if (stateTimer >= NET.STATE_TICK) { stateTimer = 0; net.state(player.s, player.lat, player.speed); }
-    if (race.isHost) {
-      trafficTimer += dt;
-      if (trafficTimer >= NET.TRAFFIC_TICK) { trafficTimer = 0; net.traffic(traffic.snapshot()); }
-    }
     rivals.update(dt, road, camera);
     // Гонка на время: финишная арка на фиксированной дистанции.
     if (race.mode === 'timed' && !race.finishedMe) {
@@ -1512,9 +1526,7 @@ function stepGrid(dt) {
   road.setPalette(p);
   road.update(player.s);
   propPool.sync(road.props);
-  // Позиции шлём и на решётке — иначе соперники не видны до старта.
-  stateTimer += dt;
-  if (stateTimer >= NET.STATE_TICK) { stateTimer = 0; net.state(player.s, player.lat, player.speed); }
+  // Позиции на решётке тоже рассылает таймер из beginRace — иначе соперники не видны до старта.
   rivals.update(dt, road, camera);
   fxAdd.update(dt);
   fxSoft.update(dt);
