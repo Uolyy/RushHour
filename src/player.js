@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { buildCar } from './carModel.js';
+import { buildPlayerCar, disposeCar } from './carModel.js';
 import { PLAYER, TRACK } from './config.js';
 import { clamp, damp } from './utils.js';
 
@@ -11,7 +11,10 @@ const tmpB = {};
 
 export class Player {
   constructor(scene) {
-    this.model = buildCar('player', 0xc9403a);
+    this.scene = scene;
+    this.skin = 'stock';
+    this.color = 0xc9403a;
+    this.model = buildPlayerCar(this.skin, this.color);
     this.group = this.model.group;
     this.group.rotation.order = 'YXZ'; // сначала yaw, потом pitch, потом крен
     scene.add(this.group);
@@ -27,6 +30,25 @@ export class Player {
     this.wheelSpin = 0;
     this.time = 0;
     this.reset();
+  }
+
+  // Сменить вид машины (скин + цвет). Модель пересобирается на лету.
+  setLook(skin, colorHex) {
+    if (skin === this.skin && colorHex === this.color) return;
+    this.skin = skin;
+    this.color = colorHex;
+    const old = this.model;
+    const model = buildPlayerCar(skin, colorHex);
+    this.model = model;
+    this.group = model.group;
+    this.group.rotation.order = 'YXZ';
+    // Фары и их цель переезжают в новую модель.
+    this.group.add(this.head, this.headTarget);
+    this.scene.remove(old.group);
+    this.scene.add(this.group);
+    // Старую модель чистим (общие материалы не трогаем).
+    disposeCar(old);
+    this.place(this.road, 0, 0);
   }
 
   reset() {
@@ -91,10 +113,17 @@ export class Player {
 
     this.place(road, steer, dt);
     this.model.tailMat.emissiveIntensity = input.brake ? 4.5 : 1.4;
+    // Мигалка скина «полиция» — мигает по фазе, как у патрульных.
+    if (this.model.siren) {
+      const ph = Math.floor(this.time * 6) % 2 === 0;
+      this.model.siren.r.emissiveIntensity = ph ? 5 : 0.15;
+      this.model.siren.b.emissiveIntensity = ph ? 0.15 : 5;
+    }
   }
 
   // Расстановка меша в мир по текущим s/lat.
   place(road, steer = 0, dt = 0) {
+    this.road = road; // запоминаем — нужно для смены машины на лету
     const w = road.worldOf(this.s, this.lat, tmpB);
     this.wx = w.px; this.wy = w.py; this.wz = w.pz; this.wh = w.h;
     this.group.position.set(w.px, w.py, w.pz);

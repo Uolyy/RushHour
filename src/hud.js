@@ -46,9 +46,22 @@ export class HUD {
       customWarn: document.getElementById('custom-warn'),
       raceCodeRow: document.getElementById('race-code-row'),
       raceCode: document.getElementById('race-code'),
+      raceGo: document.getElementById('race-go'),
       raceStatus: document.getElementById('race-status'),
       racePlayers: document.getElementById('race-players'),
+      coinCount: document.getElementById('coin-count'),
+      garageScreen: document.getElementById('garage-screen'),
+      garageName: document.getElementById('garage-name'),
+      garageDesc: document.getElementById('garage-desc'),
+      garageSwatches: document.getElementById('garage-swatches'),
+      garageSelect: document.getElementById('garage-select'),
+      garageCoins: document.getElementById('garage-coins'),
+      garagePrev: document.getElementById('garage-prev'),
+      garageNext: document.getElementById('garage-next'),
+      garageBack: document.getElementById('garage-back'),
+      garageBtn: document.getElementById('garage-btn'),
     };
+    this.codeRowOpen = false; // открыто ли поле ввода кода комнаты («ВОЙТИ»)
   }
 
   setBest(v) { this.el.best.textContent = String(v); }
@@ -157,7 +170,10 @@ export class HUD {
     if (!rows || !rows.length) html += '<div class="lb-row"><span>ПУСТО — СТАНЬ ПЕРВЫМ</span><span></span></div>';
     for (const r of rows) {
       const me = meNick && r.nick.toLowerCase() === meNick.toLowerCase() ? ' me' : '';
-      html += `<div class="lb-row${me}"><span>${escapeHtml(r.nick)}</span><span>${r.score}</span></div>`;
+      // Время заезда в скобках рядом с очками: «1234 (1:23)».
+      const t = formatTime(r.run_time);
+      const time = t ? `<span class="lb-time">(${t})</span>` : '';
+      html += `<div class="lb-row${me}"><span>${escapeHtml(r.nick)}</span><span>${r.score}${time}</span></div>`;
     }
     el.innerHTML = html;
   }
@@ -191,6 +207,8 @@ export class HUD {
     // Выбор режима — только у хоста и только в созданной им комнате.
     this.el.raceModeRow.style.display = mode === 'lobby-host' ? 'flex' : 'none';
     this.el.raceCopy.style.display = inLobby ? 'inline-block' : 'none';
+    // Поле ввода кода видно только в обычном меню и только пока его открыли «ВОЙТИ».
+    this.el.raceCodeRow.style.display = (mode === 'menu' && this.codeRowOpen) ? 'flex' : 'none';
     this.setPlayVisible(!this.authOpen);
     this.setPlayLabel(inLobby ? 'ВЫЙТИ ИЗ КОМНАТЫ' : 'ИГРАТЬ');
   }
@@ -205,8 +223,75 @@ export class HUD {
   setCustomWarn(v) {
     this.el.customWarn.style.display = v ? 'block' : 'none';
   }
+
+  // --- Экран гаража ---
+  // Показать/спрятать экран гаража.
+  setGarageVisible(v) {
+    if (!this.el.garageScreen) return;
+    this.el.garageScreen.classList.toggle('on', !!v);
+  }
+
+  // Обновить содержимое гаража.
+  // colors: [{id, hex}], skins: [{id, name, desc, price, hasColors}]
+  // state: {skin, color, owned:Set, coins}
+  renderGarage(colors, skins, state, onColor) {
+    if (!this.el.garageScreen) return;
+    const skin = skins.find((s) => s.id === state.skin) || skins[0];
+    this.el.garageName.textContent = skin.name;
+    this.el.garageDesc.textContent = skin.desc;
+    // Кнопка: «ВЫБРАНО» — если превью совпадает с текущим видом машины,
+    // «ВЫБРАТЬ» — если машина наша, но другой вид, «КУПИТЬ · N» — если не куплена.
+    const owned = state.owned.has(skin.id);
+    const isCurrent = owned && skin.id === state.curSkin
+      && (!skin.hasColors || state.color === state.curColor);
+    const btn = this.el.garageSelect;
+    btn.classList.remove('buy', 'on');
+    if (isCurrent) {
+      btn.textContent = 'ВЫБРАНО';
+      btn.classList.add('on');
+    } else if (owned) {
+      btn.textContent = 'ВЫБРАТЬ';
+    } else {
+      btn.textContent = 'КУПИТЬ · ' + skin.price;
+      btn.classList.add('buy');
+    }
+    // Палитра цветов — только если у машины есть выбор цвета.
+    const sw = this.el.garageSwatches;
+    if (skin.hasColors) {
+      sw.style.display = 'flex';
+      sw.innerHTML = colors.map((c) => `
+        <button class="garage-chip${c.id === state.color ? ' on' : ''}" data-color="${c.id}"
+          style="background:${c.hex}"></button>`).join('');
+      for (const chip of sw.querySelectorAll('.garage-chip')) {
+        chip.addEventListener('click', () => onColor(chip.dataset.color));
+      }
+    } else {
+      sw.style.display = 'none';
+      sw.innerHTML = '';
+    }
+    this.setCoins(state.coins);
+  }
+
+  // Счётчик монет (в HUD и в гараже).
+  setCoins(n) {
+    const v = String(Math.max(0, Math.floor(n || 0)));
+    if (this.el.coinCount) this.el.coinCount.textContent = v;
+    if (this.el.garageCoins) this.el.garageCoins.textContent = v;
+  }
 }
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Время заезда в формате «м:сс» (при долгих минутах — «ч:мм:сс»).
+export function formatTime(sec) {
+  const s = Number(sec);
+  if (!Number.isFinite(s) || s <= 0) return '';
+  const total = Math.floor(s);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const ss = total % 60;
+  const pad = (v) => String(v).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(ss)}` : `${m}:${pad(ss)}`;
 }

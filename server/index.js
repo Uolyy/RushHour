@@ -14,6 +14,12 @@ import { spawn } from 'node:child_process';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
 const TRAFFIC_DEFAULT = 14; // стандартная плотность трафика
+// Серия раундов сетевой гонки: 3 заезда, каждый следующий на ROUND_STEP длиннее.
+// Победитель раунда получает 1 победное очко, итоговый победитель — по очкам.
+const ROUNDS_TOTAL = 3;
+const RACE_LENGTH_BASE = 2000; // дистанция финиша 1-го раунда (режим «на время»), м
+const ROUND_STEP = 2000;      // прибавка к дистанции финиша за раунд, м
+const NEXT_ROUND_DELAY = 7000; // пауза между раундами (показ результатов), мс
 
 // Лог в файл: data/server.log — чтобы причину падения можно было прислать.
 const dataDir = path.join(__dirname, '..', 'data');
@@ -52,26 +58,56 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     player_id INTEGER NOT NULL REFERENCES players(id),
     score INTEGER NOT NULL,
+    run_time REAL NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `);
+// Старые базы без колонки времени — добавляем (ALTER на уже существующей таблице).
+try {
+  const cols = db.prepare('PRAGMA table_info(scores)').all().map((c) => c.name);
+  if (!cols.includes('run_time')) db.exec('ALTER TABLE scores ADD COLUMN run_time REAL NOT NULL DEFAULT 0');
+} catch (e) {
+  LOG('scores migration failed: ' + (e && e.message));
+}
 
 const qPlayerByName = db.prepare('SELECT id, nick FROM players WHERE nick = ? COLLATE NOCASE');
 const qInsertPlayer = db.prepare('INSERT INTO players (nick) VALUES (?)');
-const qInsertScore = db.prepare('INSERT INTO scores (player_id, score) VALUES (?, ?)');
+const qInsertScore = db.prepare('INSERT INTO scores (player_id, score, run_time) VALUES (?, ?, ?)');
 const qBestOfPlayer = db.prepare('SELECT MAX(score) AS best FROM scores WHERE player_id = ?');
 const qRank = db.prepare(`SELECT COUNT(*) AS c FROM (
   SELECT player_id, MAX(score) AS m FROM scores GROUP BY player_id
 ) t WHERE t.m > ?`);
 const qPlayersCount = db.prepare('SELECT COUNT(DISTINCT player_id) AS c FROM scores');
+// Лучший результат игрока + время заезда, за который он достигнут.
 const qLeaderboard = db.prepare(`
-  SELECT p.nick AS nick, MAX(s.score) AS score
-  FROM scores s JOIN players p ON p.id = s.player_id
-  GROUP BY s.player_id ORDER BY score DESC LIMIT 10`);
+  SELECT p.nick AS nick, s.score AS score, MIN(s.run_time) AS run_time
+  FROM scores s
+  JOIN players p ON p.id = s.player_id
+  JOIN (
+    SELECT player_id, MAX(score) AS ms FROM scores GROUP BY player_id
+  ) b ON b.player_id = s.player_id AND s.score = b.ms
+  GROUP BY s.player_id
+  ORDER BY score DESC, run_time ASC LIMIT 10`);
 
 const NICK_RE = /^[\p{L}\p{N}_ -]{2,15}$/u;
 function normNick(raw) {
   return String(raw ?? '').trim().replace(/\s+/g, ' ');
+}
+
+// Кастомизация машины: белый список скинов и цветов (из клиента не доверяем).
+const SKIN_IDS = ['stock', 'taxi', 'icecream', 'neon', 'police', 'rainbow'];
+const COLOR_IDS = ['red', 'blue', 'green', 'sand', 'violet', 'pink', 'white', 'dark'];
+const COLOR_HEX = {
+  red: 0xc9403a, blue: 0x3a8fc9, green: 0x3ac96f, sand: 0xc9a13a,
+  violet: 0x9a3ac9, pink: 0xc93a8f, white: 0xe6e8ee, dark: 0x2b2f3a,
+};
+function normSkin(raw) {
+  const id = String(raw ?? '');
+  return SKIN_IDS.includes(id) ? id : 'stock';
+}
+function normColor(raw) {
+  const id = String(raw ?? '');
+  return COLOR_IDS.includes(id) ? id : 'red';
 }
 
 // ---------- REST API ----------
@@ -98,6 +134,8 @@ app.post('/api/login', (req, res) => {
 app.post('/api/scores', (req, res) => {
   const nick = normNick(req.body?.nick);
   const score = Math.floor(Number(req.body?.score));
+  // Время заезда в секундах — показываем в таблице рекордов.
+  const runTime = Math.max(0, Math.min(86400, Number(req.body?.run_time) || 0));
   if (!NICK_RE.test(nick) || !Number.isFinite(score) || score < 0) {
     return res.status(400).json({ error: 'bad request' });
   }
@@ -106,7 +144,7 @@ app.post('/api/scores', (req, res) => {
     const info = qInsertPlayer.run(nick);
     p = { id: Number(info.lastInsertRowid), nick };
   }
-  qInsertScore.run(p.id, score);
+  qInsertScore.run(p.id, score, runTime);
   const best = qBestOfPlayer.get(p.id).best;
   const rank = qRank.get(best).c + 1;
   const total = qPlayersCount.get().c;
@@ -151,7 +189,9 @@ function lobbyMsg(room) {
     t: 'lobby',
     code: room.code,
     hostId: room.host.id,
-    players: [...room.players].map((p) => ({ id: p.id, nick: p.nick, host: p === room.host })),
+    players: [...room.players].map((p) => ({
+      id: p.id, nick: p.nick, host: p === room.host, skin: p.skin, color: p.color,
+    })),
   };
 }
 function broadcast(room, msg, exceptWs = null) {
@@ -160,26 +200,55 @@ function broadcast(room, msg, exceptWs = null) {
     if (p.ws !== exceptWs && p.ws.readyState === 1) p.ws.send(data);
   }
 }
-function closeRoom(room, why) {
+// Вернуть комнату в состояние лобби: заезд сброшен, но комната и её код живут.
+// Так группа сохраняется между заездами — заново создавать комнату не нужно.
+// Серия раундов при этом обнуляется: следующий «ИГРАТЬ» хоста — это раунд 1.
+function resetRoomToLobby(room) {
+  room.started = false;
+  room.gridCountdown = false;
   if (room.goTimer) { clearTimeout(room.goTimer); room.goTimer = null; }
-  broadcast(room, { t: 'aborted', msg: why || '' });
+  if (room.pendingStart) { clearTimeout(room.pendingStart); room.pendingStart = null; }
+  room.round = 0;
+  room.wins = {};
+  room.firstFinisher = null;
+  room.lastCrashed = null;
+  room.seed = (Math.random() * 1e9) | 0; // следующий заезд — по новой трассе
   for (const p of room.players) {
-    p.ws.raceRoom = null;
-    try { p.ws.close(); } catch { /* */ }
+    p.crashed = false;
+    p.finished = false;
+    p.ready2 = false;
+    p.score = 0;
   }
-  rooms.delete(room.code);
+  broadcast(room, lobbyMsg(room));
 }
 
 // Все в лобби нажали «ГОТОВ» — грузим всех на трассу (на стартовую решётку).
+// Каждый запуск — один раунд серии: round растёт до ROUNDS_TOTAL, у победителя
+// раунда копится победное очко. Дистанция финиша (режим «на время») растёт с раундом.
 function startRace(room) {
+  if (room.round >= ROUNDS_TOTAL) { room.round = 0; room.wins = {}; } // серия кончилась — начинаем новую
+  room.round++;
+  room.firstFinisher = null;
+  room.lastCrashed = null;
+  for (const p of room.players) {
+    p.crashed = false;
+    p.finished = false;
+    p.ready2 = false;
+    p.score = 0;
+  }
   room.started = true;
+  room.seed = (Math.random() * 1e9) | 0; // каждый раунд — своя трасса
   const cfg = room.cfg || {};
+  const timed = cfg.mode === 'timed';
   broadcast(room, {
     t: 'started',
     seed: room.seed,
-    mode: cfg.mode === 'timed' ? 'timed' : 'endless',
+    mode: timed ? 'timed' : 'endless',
     lanes: Math.min(6, Math.max(2, Math.floor(Number(cfg.lanes) || 4))),
     traffic: Math.min(30, Math.max(0, Math.floor(Number(cfg.traffic) || TRAFFIC_DEFAULT))),
+    round: room.round,
+    rounds: ROUNDS_TOTAL,
+    length: timed ? RACE_LENGTH_BASE + (room.round - 1) * ROUND_STEP : undefined,
   });
 }
 
@@ -195,15 +264,40 @@ function beginGridCountdown(room) {
   }, 5000);
 }
 
-// Все доехали до финиша или выбыли — рассылаем таблицу результатов и закрываем комнату.
-// Возвращает true, если гонка завершена.
+// Все доехали до финиша или выбыли — рассылаем таблицу результатов.
+// Серия из ROUNDS_TOTAL раундов: победитель раунда получает 1 победное очко
+// (в гонке на время — первый финишировавший, в бесконечной — последний выживший).
+// После промежуточного раунда следующий стартует автоматически; после последнего —
+// комната возвращается в лобби, победитель серии объявляется по победным очкам.
+// Возвращает true, если гонка (раунд) завершена.
 function checkRaceOver(room) {
   if (!room.players.every((p) => p.crashed || p.finished)) return false;
-  const rows = [...room.players].sort((a, b) => b.score - a.score)
-    .map((p) => ({ nick: p.nick, score: p.score }));
-  broadcast(room, { t: 'results', rows });
-  for (const p of room.players) p.ws.raceRoom = null;
-  rooms.delete(room.code);
+  const winnerId = (room.cfg && room.cfg.mode) === 'timed' ? room.firstFinisher : room.lastCrashed;
+  if (winnerId != null) room.wins[winnerId] = (room.wins[winnerId] || 0) + 1;
+  const rows = [...room.players]
+    .map((p) => ({ id: p.id, nick: p.nick, score: p.score, wins: room.wins[p.id] || 0, roundWin: p.id === winnerId }))
+    .sort((a, b) => b.wins - a.wins || b.score - a.score);
+  const final = room.round >= ROUNDS_TOTAL;
+  broadcast(room, { t: 'results', rows, round: room.round, rounds: ROUNDS_TOTAL, final });
+  if (final) {
+    room.round = 0;
+    room.wins = {};
+    resetRoomToLobby(room); // серия кончилась — лобби, хост может начать новую
+    return true;
+  }
+  // Промежуточный раунд: через паузу автоматически грузим следующий заезд.
+  if (room.pendingStart) clearTimeout(room.pendingStart);
+  room.pendingStart = setTimeout(() => {
+    room.pendingStart = null;
+    if (!rooms.has(room.code)) return;
+    if (room.players.length < 2) { // остался один — серия бессмысленна, в лобби
+      room.round = 0;
+      room.wins = {};
+      resetRoomToLobby(room);
+      return;
+    }
+    startRace(room);
+  }, NEXT_ROUND_DELAY);
   return true;
 }
 
@@ -224,8 +318,12 @@ wss.on('connection', (ws) => {
         if (room) return;
         const code = makeCode();
         if (!code) return ws.send(JSON.stringify({ t: 'error', msg: 'Нет свободных кодов' }));
-        const r = { code, host: null, players: [], started: false, gridCountdown: false, goTimer: null, cfg: null, seed: (Math.random() * 1e9) | 0 };
-        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, ready2: false, score: 0 };
+        const r = { code, host: null, players: [], started: false, gridCountdown: false, goTimer: null, cfg: null, seed: (Math.random() * 1e9) | 0, round: 0, wins: {}, firstFinisher: null, lastCrashed: null, pendingStart: null };
+        const player = {
+          ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER',
+          crashed: false, finished: false, ready2: false, score: 0,
+          skin: normSkin(msg.skin), color: normColor(msg.color),
+        };
         r.host = player;
         r.players.push(player);
         rooms.set(code, r);
@@ -242,12 +340,24 @@ wss.on('connection', (ws) => {
         }
         if (r.started) return ws.send(JSON.stringify({ t: 'error', msg: 'Гонка уже началась' }));
         if (r.countdown) return ws.send(JSON.stringify({ t: 'error', msg: 'Идёт отсчёт — гонка уже начинается' }));
-        const player = { ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER', crashed: false, finished: false, ready2: false, score: 0 };
+        const player = {
+          ws, id: playerIdSeq++, nick: normNick(msg.nick) || 'PLAYER',
+          crashed: false, finished: false, ready2: false, score: 0,
+          skin: normSkin(msg.skin), color: normColor(msg.color),
+        };
         r.players.push(player);
         ws.raceRoom = r;
         ws.racePlayer = player;
         ws.send(JSON.stringify({ ...lobbyMsg(r), t: 'joined', code: r.code, you: player.id }));
         broadcast(r, lobbyMsg(r), ws);
+        break;
+      }
+      case 'look': {
+        // Игрок сменил вид машины в лобби — запоминаем и сообщаем остальным.
+        if (!room || !me) return;
+        me.skin = normSkin(msg.skin);
+        me.color = normColor(msg.color);
+        broadcast(room, lobbyMsg(room));
         break;
       }
       case 'cfg': {
@@ -289,6 +399,7 @@ wss.on('connection', (ws) => {
         if (!room || !room.started || !me || me.crashed) return;
         me.crashed = true;
         me.score = Math.floor(Number(msg.score) || 0);
+        room.lastCrashed = me.id; // в бесконечном режиме последний на ходу — победитель раунда
         broadcast(room, { t: 'crashed', id: me.id, score: me.score }, ws);
         checkRaceOver(room);
         break;
@@ -298,6 +409,7 @@ wss.on('connection', (ws) => {
         if (!room || !room.started || !me || me.finished) return;
         me.finished = true;
         me.score = Math.floor(Number(msg.score) || 0);
+        if (room.firstFinisher == null) room.firstFinisher = me.id; // первый финишировавший — победитель раунда
         broadcast(room, { t: 'finished', id: me.id }, ws);
         checkRaceOver(room);
         break;
@@ -322,13 +434,17 @@ function removeFromRoom(room, me) {
   me.ws.raceRoom = null;
   me.ws.racePlayer = null;
   if (!room.players.length) {
+    if (room.pendingStart) { clearTimeout(room.pendingStart); room.pendingStart = null; }
     rooms.delete(room.code);
     return;
   }
+  if (wasHost) room.host = room.players[0];
   if (room.started) {
     if (wasHost) {
-      // Хост ушёл посреди гонки — трафик больше никем не симулируется, сворачиваем.
-      closeRoom(room, 'Хост вышел из гонки');
+      // Хост ушёл посреди гонки — трафик больше никем не симулируется.
+      // Гонку прерываем, но комнату оставляем: группа собирается в лобби заново.
+      broadcast(room, { t: 'aborted', msg: 'Хост вышел из гонки' });
+      resetRoomToLobby(room);
       return;
     }
     if (room.gridCountdown) {
@@ -339,7 +455,6 @@ function removeFromRoom(room, me) {
     broadcast(room, { t: 'ready2', players: room.players.map((p) => ({ id: p.id, ready2: !!p.ready2 })) });
     if (checkRaceOver(room)) return;
   }
-  if (wasHost) room.host = room.players[0];
   broadcast(room, lobbyMsg(room));
 }
 

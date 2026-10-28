@@ -13,6 +13,10 @@ const KINDS = [
   { kind: 'police', speed: [30, 38], w: TRAFFIC.POLICE_W },
 ];
 const COLORS = ['#dcdcd8', '#b9b3a6', '#3d4f66', '#c9a13d', '#3f7a72', '#a84a3f', '#6b6f76', '#303239'];
+// Задержка отрисовки удалённого трафика: рисуем чуть позади свежего снапшота,
+// чтобы плавно интерполировать между пакетами (без рывков).
+const TRAFFIC_SNAP_DELAY = 0.12;
+const SNAP_BUF_MAX = 16;     // размер буфера снапшотов на машину
 
 function pickKind() {
   const r = Math.random();
@@ -89,18 +93,34 @@ export class Traffic {
   }
 
   // Снапшот от хоста: [{i, s, lat, v, k}]
+  // Позиции не ставим «мгновенно» — копим снапшоты в буфер, а в update()
+  // рисуем с задержкой, плавно интерполируя между соседними пакетами.
   applySnapshot(arr) {
     const seen = new Set();
+    const now = performance.now() / 1000;
     for (const item of arr) {
       if (!item || item.i < 0 || item.i >= TRAFFIC.MAX) continue;
       const car = this.cars[item.i];
       seen.add(item.i);
       if (car.kind !== (KINDS[item.k] || KINDS[0]).kind) this.setKind(car, item.k);
-      car.s = item.s; car.lat = item.lat; car.speed = item.v;
+      if (!car.snapBuf) car.snapBuf = [];
+      car.snapBuf.push({ t: now, s: item.s, lat: item.lat, v: item.v });
+      if (car.snapBuf.length > SNAP_BUF_MAX) car.snapBuf.shift();
+      if (!car.snapInit) { // первая машина — сразу на место, без интерполяции
+        car.s = item.s; car.lat = item.lat; car.speed = item.v;
+        car.snapInit = true;
+      }
       car.latTarget = car.lat; car.laneIdx = 0;
     }
     for (let i = 0; i < TRAFFIC.MAX; i++) {
-      this.cars[i].model.group.visible = seen.has(i);
+      const car = this.cars[i];
+      car.model.group.visible = seen.has(i);
+      if (!seen.has(i)) {
+        // Машины нет в кадре — сбрасываем снапшоты, чтобы в следующем заезде
+        // она появилась сразу на месте, без интерполяции от старой позиции.
+        car.snapBuf = null; car.snapInit = false;
+        car.sCol = undefined; car.latCol = undefined;
+      }
     }
   }
 
@@ -194,6 +214,40 @@ export class Traffic {
       const car = this.cars[i];
       if (this.remote && !car.model.group.visible) continue;
 
+      // --- 0. Удалённый режим: плавная интерполяция между снапшотами хоста ---
+      if (this.remote && car.snapBuf && car.snapBuf.length) {
+        const now = performance.now() / 1000;
+        const renderT = now - TRAFFIC_SNAP_DELAY;
+        const buf = car.snapBuf;
+        // Ищем два снапшота, между которыми лежит момент отрисовки.
+        let a = null, b = null;
+        for (let i = buf.length - 1; i >= 0; i--) {
+          if (buf[i].t <= renderT) { a = buf[i]; b = buf[i + 1] || null; break; }
+        }
+        if (!a) { a = buf[0]; b = buf[1] || null; }
+        let s, lat, v;
+        if (b && renderT <= b.t) {
+          const span = Math.max(1e-4, b.t - a.t);
+          const f = clamp((renderT - a.t) / span, 0, 1);
+          s = a.s + (b.s - a.s) * f;
+          lat = a.lat + (b.lat - a.lat) * f;
+          v = a.v + (b.v - a.v) * f;
+        } else {
+          // Снапшотов не хватает — продолжаем движение по последней скорости.
+          const last = b || a;
+          const age = Math.min(0.3, Math.max(0, renderT - last.t));
+          s = last.s + last.v * age;
+          lat = last.lat;
+          v = last.v;
+        }
+        car.s = s; car.lat = lat; car.speed = v;
+        // Актуальная позиция (без задержки отрисовки) — по ней считаем столкновения.
+        const last = buf[buf.length - 1];
+        const ahead = Math.min(0.3, Math.max(0, now - last.t));
+        car.sCol = last.s + last.v * ahead;
+        car.latCol = last.lat;
+      }
+
       // --- 1-3. Локальная симуляция (дистанция, разгон, перестроения) ---
       if (!this.remote) {
         let aheadDs = Infinity;
@@ -244,8 +298,11 @@ export class Traffic {
       }
 
       // --- 4. коллизия с игроком и near-miss ---
-      const ds = car.s - player.s;
-      const dl = Math.abs(car.lat - player.lat);
+      // В удалённом режиме берём актуальную позицию (без задержки отрисовки).
+      const cs = this.remote && car.sCol !== undefined ? car.sCol : car.s;
+      const cl = this.remote && car.latCol !== undefined ? car.latCol : car.lat;
+      const ds = cs - player.s;
+      const dl = Math.abs(cl - player.lat);
       if (!crash && Math.abs(ds) < (car.dims.len + PLAYER.LENGTH) / 2 && dl < (car.dims.w + PLAYER.WIDTH) / 2) {
         crash = true;
       }

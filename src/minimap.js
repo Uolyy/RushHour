@@ -7,7 +7,7 @@ export class Minimap {
     this.out = {};
   }
 
-  draw(player, road, traffic, pickups, ghost, rivals) {
+  draw(player, road, traffic, pickups, ghost, rivals, coins) {
     const ctx = this.ctx;
     const W = this.canvas.width;
     const H = this.canvas.height;
@@ -50,6 +50,15 @@ export class Minimap {
     if (pickups) {
       ctx.fillStyle = '#36e0ff';
       for (const item of pickups.pool) {
+        if (item.s < player.s - 30 || item.s > player.s + 560) continue;
+        const [x, y] = map(item.s, item.lat);
+        ctx.fillRect(x - 2, y - 2, 4, 4);
+      }
+    }
+    // монетки
+    if (coins) {
+      ctx.fillStyle = '#ffd257';
+      for (const item of coins.pool) {
         if (item.s < player.s - 30 || item.s > player.s + 560) continue;
         const [x, y] = map(item.s, item.lat);
         ctx.fillRect(x - 2, y - 2, 4, 4);

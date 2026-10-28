@@ -63,6 +63,7 @@ export class Road {
   }
 
   reset(seed) {
+    this.seed = seed >>> 0;
     this.noiseH = makeNoise1D(seed, TRACK.CURVE_PERIOD);
     this.noiseE = makeNoise1D(seed + 1013, TRACK.ELEV_PERIOD);
     this.rand = mulberry32((seed ^ 0x9e3779b9) >>> 0);
@@ -133,7 +134,8 @@ export class Road {
 
   update(playerS) {
     this.extendTo(Math.ceil((playerS + TRACK.AHEAD) / TRACK.STEP) + 3);
-    if (this.lastBuildS === undefined || playerS - this.lastBuildS >= TRACK.REBUILD_EVERY) {
+    // Перестраиваем, если игрок уехал вперёд ИЛИ откатился назад (рестарт/телепорт).
+    if (this.lastBuildS === undefined || Math.abs(playerS - this.lastBuildS) >= TRACK.REBUILD_EVERY) {
       this.lastBuildS = playerS;
       const i0 = Math.max(0, Math.floor((playerS - TRACK.BEHIND) / TRACK.STEP));
       const i1 = Math.ceil((playerS + TRACK.AHEAD) / TRACK.STEP);

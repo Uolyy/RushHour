@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { TRACK, PLAYER, TRAFFIC, PICKUP, PARTICLES, MOUSE, RACE } from './config.js';
+import { TRACK, PLAYER, TRAFFIC, PICKUP, PARTICLES, MOUSE, RACE, NET, COIN } from './config.js';
 import { Road } from './road.js';
 import { PropPool } from './props.js';
 import { Biomes } from './biomes.js';
@@ -15,9 +15,12 @@ import { ParticlePool, Debris, flame, tireSmoke, sparks, yawRot } from './partic
 import { PostFX } from './postfx.js';
 import { Minimap } from './minimap.js';
 import { NitroPickups } from './pickups.js';
+import { CoinPickups } from './coins.js';
+import { Garage } from './garage.js';
 import { Ghost, GhostRecorder } from './ghost.js';
 import { RaceNet } from './net.js';
 import { Rivals } from './rivals.js';
+import { CAR_COLORS, SKINS, DEFAULT_SKIN, DEFAULT_COLOR, skinById, colorById, hexToInt } from './skins.js';
 import { clamp, damp } from './utils.js';
 
 // --- Рендер ---
@@ -92,6 +95,8 @@ const fxSoft = new ParticlePool(scene, PARTICLES.MAX_SOFT, false);
 const debris = new Debris(scene);
 const minimap = new Minimap();
 const pickups = new NitroPickups(scene);
+const coins = new CoinPickups(scene);
+const garage3d = new Garage(); // 3D-витрина гаража с превью машины
 const ghost = new Ghost(scene);
 const recorder = new GhostRecorder();
 const rivals = new Rivals(scene);
@@ -146,8 +151,9 @@ scene.add(finishGate);
 // Поставить арку на дистанции финиша (вызывать после resetWorld).
 function placeFinishGate() {
   if (!race || !race.active || race.mode !== 'timed') { finishGate.visible = false; return; }
-  road.extendTo(Math.ceil(RACE.LENGTH / TRACK.STEP) + 4);
-  const w = road.worldOf(RACE.LENGTH, 0, {});
+  const finishS = race.finishS === Infinity ? RACE.LENGTH : race.finishS;
+  road.extendTo(Math.ceil(finishS / TRACK.STEP) + 4);
+  const w = road.worldOf(finishS, 0, {});
   finishGate.position.set(w.px, w.py, w.pz);
   finishGate.rotation.y = w.h;
   const half = road.roadwayHalf;
@@ -179,6 +185,111 @@ localStorage.removeItem('rushhour_ta_ghost');
 let best = Number(localStorage.getItem('rushhour_best') || 0);
 hud.setBest(best);
 
+// --- Гараж: кастомизация машины (цвет + скины за монеты) ---
+// Всё хранится в localStorage: монеты, купленные скины и текущий вид.
+const GARAGE_KEY = 'rushhour_garage';
+const garage = {
+  coins: 0,
+  owned: new Set([DEFAULT_SKIN]),
+  skin: DEFAULT_SKIN,
+  color: DEFAULT_COLOR,
+};
+try {
+  const g = JSON.parse(localStorage.getItem(GARAGE_KEY) || '{}');
+  garage.coins = Math.max(0, Math.floor(Number(g.coins) || 0));
+  garage.owned = new Set([DEFAULT_SKIN, ...(Array.isArray(g.owned) ? g.owned : [])]);
+  garage.skin = skinById(g.skin).id;
+  garage.color = colorById(g.color).id;
+} catch { /* битые настройки — берём значения по умолчанию */ }
+function saveGarage() {
+  localStorage.setItem(GARAGE_KEY, JSON.stringify({
+    coins: garage.coins,
+    owned: [...garage.owned],
+    skin: garage.skin,
+    color: garage.color,
+  }));
+}
+
+// Текущий вид машины: скин + цвет кузова.
+const currentLook = () => ({
+  skin: garage.skin,
+  color: garage.color,
+  hex: hexToInt(colorById(garage.color).hex),
+});
+// Применить вид к машине игрока и сообщить о нём (в лобби — остальным).
+function applyLook() {
+  const look = currentLook();
+  player.setLook(look.skin, look.hex);
+  if (race.inLobby) net.look(look.skin, look.color);
+}
+
+// --- Экран гаража: превью машины, стрелки, палитра, кнопка «ВЫБРАТЬ» ---
+const garageView = {
+  open: false,
+  skinIndex: 0,   // какой скин сейчас показан в превью
+  colorId: '',    // какой цвет выбран в превью
+};
+function openGarage() {
+  garageView.open = true;
+  garageView.skinIndex = Math.max(0, SKINS.findIndex((s) => s.id === garage.skin));
+  garageView.colorId = garage.color;
+  hud.setGarageVisible(true);
+  hud.setPanel(false);
+  hud.hideOverlay();
+  updateGarageView();
+}
+function closeGarage() {
+  garageView.open = false;
+  hud.setGarageVisible(false);
+  state = 'menu'; // вернуться в обычное меню: рендер трассы, клик по «ГАРАЖ» снова работает
+  enterMenu();
+  hud.showOverlay('RUSH HOUR', '', ''); // оверлей — контейнер меню, его надо вернуть видимым
+}
+// Перерисовать превью и панель гаража под текущий выбор.
+function updateGarageView() {
+  const skin = SKINS[garageView.skinIndex] || SKINS[0];
+  const colorId = skin.hasColors ? garageView.colorId : garage.color;
+  // Превью в 3D: собираем модель выбранной машины.
+  garage3d.setLook(skin.id, hexToInt(colorById(colorId).hex));
+  hud.renderGarage(
+    CAR_COLORS, SKINS,
+    {
+      skin: skin.id, color: colorId, owned: garage.owned, coins: garage.coins,
+      curSkin: garage.skin, curColor: garage.color, // что сейчас надето — для «ВЫБРАНО»
+    },
+    (cid) => {
+      garageView.colorId = cid;
+      updateGarageView();
+    }
+  );
+}
+// Стрелки: листаем по машинам.
+function garageStep(dir) {
+  const n = SKINS.length;
+  garageView.skinIndex = (garageView.skinIndex + dir + n) % n;
+  updateGarageView();
+}
+// Кнопка «ВЫБРАТЬ» / «КУПИТЬ».
+function garageSelect() {
+  const skin = SKINS[garageView.skinIndex] || SKINS[0];
+  if (!garage.owned.has(skin.id)) {
+    if (garage.coins < skin.price) {
+      hud.toast('НУЖНО ЕЩЁ ' + (skin.price - garage.coins) + ' МОНЕТ');
+      return;
+    }
+    garage.coins -= skin.price;
+    garage.owned.add(skin.id);
+    hud.toast('КУПЛЕНО: ' + skin.name);
+  }
+  garage.skin = skin.id;
+  if (skin.hasColors) garage.color = garageView.colorId;
+  saveGarage();
+  applyLook();
+  hud.setCoins(garage.coins);
+  updateGarageView();
+}
+hud.setCoins(garage.coins);
+
 // --- Ник и общая таблица рекордов ---
 const NICK_KEY = 'rushhour_nick';
 let myNick = localStorage.getItem(NICK_KEY) || '';
@@ -192,13 +303,13 @@ function refreshLeaderboard() {
     .catch(() => { /* сервер недоступен — таблица просто не обновится */ });
 }
 
-async function submitScore(nick, score) {
+async function submitScore(nick, score, runTime) {
   if (!nick) return; // гость — без рейтинга
   try {
     const r = await fetch('/api/scores', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nick, score }),
+      body: JSON.stringify({ nick, score, run_time: Math.max(0, Math.round((runTime || 0) * 100) / 100) }),
     });
     const d = await r.json().catch(() => ({}));
     if (r.ok) {
@@ -251,18 +362,24 @@ const race = {
   gridReady: false,    // нажал ли «ГОТОВ» уже на стартовой решётке
   gridCountdown: false, // идёт отсчёт 5..1 на решётке (газ заблокирован)
   isHost: false,
+  resultsShown: false, // показан экран результатов (ждём нажатия клавиши)
+  round: 1,            // текущий раунд серии (1..ROUNDS_TOTAL)
+  rounds: 3,           // всего раундов в серии
+  wins: {},            // победные очки: id игрока -> победы (1 победа = 1 очко)
 };
 // Все, кто закончил заезд (финишировал или разбился) — для списка игроков.
 const raceDoneSet = () => new Set([...race.crashed, ...race.finished]);
 let stateTimer = 0, trafficTimer = 0;
 
 // --- Состояние партии ---
-let state = 'menu'; // menu | play | over | pause
+let state = 'menu'; // menu | play | over | pause | grid | garage
 let mode = 'keys'; // 'keys' | 'mouse'
 const mouse = { x: 0.5, virt: 0, gas: false, brake: false }; // virt: виртуальный курсор (-1..1) для pointer lock
 let score = 0, combo = 0, comboTimer = 0;
 let shake = 0, overTimer = 0, overShown = false, overTitle = 'CRASHED';
 let timeScale = 1;
+let coinsDirty = false; // монеты собраны — надо сохранить в localStorage
+let runTime = 0; // длительность текущего заезда, сек (для таблицы рекордов)
 const tmpW = {};
 
 function resetWorld(newSeed) {
@@ -274,7 +391,10 @@ function resetWorld(newSeed) {
   propPool.sync(road.props);
   traffic.reset(player.s, road);
   pickups.reset(player.s, road);
+  coins.reset(player.s, road);
   score = 0; combo = 0; comboTimer = 0;
+  runTime = 0; // новый заезд — таймер с нуля
+  coinsDirty = false;
   shake = 0; overTimer = 0; overShown = false; timeScale = 1;
   fxAdd.clear();
   fxSoft.clear();
@@ -367,6 +487,7 @@ function beginRun() {
   music.duck(1);
   resetWorld((Math.random() * 1e9) | 0);
   runStandard = isStandardCfg();
+  coins.setEnabled(runStandard); // монеты — только в стандартном заезде
   updateCustomWarn();
   state = 'play';
   hud.setPanel(false);
@@ -391,6 +512,9 @@ function restart() {
 
 // --- Сетевая гонка ---
 function beginRace(cfg) {
+  // Новый заезд: гасим показ прошлых результатов.
+  race.resultsShown = false;
+  clearTimeout(resultsTimer);
   audio.init();
   music.init(audio.ctx);
   audio.setVolume(settings.volume / 10);
@@ -406,13 +530,19 @@ function beginRace(cfg) {
   race.finishedMe = false;
   race.milestone = 0;
   race.mode = cfg.mode === 'timed' ? 'timed' : 'endless';
-  race.finishS = race.mode === 'timed' ? RACE.LENGTH : Infinity;
+  race.round = Math.max(1, Math.floor(Number(cfg.round) || 1));
+  race.rounds = Math.max(1, Math.floor(Number(cfg.rounds) || 3));
+  // Дистанция финиша растёт с раундом: +2 км за каждый следующий раунд.
+  race.finishS = race.mode === 'timed'
+    ? Math.max(1, Math.floor(Number(cfg.length) || RACE.LENGTH))
+    : Infinity;
   race.gridReady = false;
   race.gridCountdown = false;
   laneCount = cfg.lanes;
   trafficCount = cfg.traffic;
   road.setLaneCount(laneCount);
   resetWorld(cfg.seed);
+  coins.setEnabled(false); // в сетевой гонке монеты не выдаются
   placeFinishGate();
 
   // Стартовая решётка: каждый игрок — в своей полосе (по порядку входа в комнату).
@@ -450,7 +580,9 @@ function beginRace(cfg) {
   hud.setRaceUi('grid');
   hud.setReady(false, false);
   hud.setOverButtons(true, false); // на решётке только «В МЕНЮ»
-  hud.showOverlay('ГОТОВЫ?', '', 'СТАРТ, КОГДА ВСЕ НАЖМУТ «ГОТОВ»' + (race.mode === 'timed' ? ' · ФИНИШ ЧЕРЕЗ ' + RACE.LENGTH + ' М' : ''));
+  hud.showOverlay('ГОТОВЫ?', '', 'РАУНД ' + race.round + ' ИЗ ' + race.rounds
+    + ' · СТАРТ, КОГДА ВСЕ НАЖМУТ «ГОТОВ»'
+    + (race.mode === 'timed' ? ' · ФИНИШ ЧЕРЕЗ ' + race.finishS + ' М' : ''));
   hud.setCustomWarn(false); // в сетевой гонке рекорды не пишутся — предупреждение не нужно
   mouse.virt = 0;
   hud.setTrafficLabel(trafficCount);
@@ -460,24 +592,30 @@ function beginRace(cfg) {
 }
 
 // Вернуть мир к обычной конфигурации после гонки.
-function endRaceCleanup() {
+// keepRoom=true — остаёмся в комнате (группа сохраняется), false — выходим из комнаты.
+function endRaceCleanup(keepRoom = false) {
   race.active = false;
-  race.inLobby = false;
   race.crashed.clear();
   race.finished.clear();
   race.finishedMe = false;
   race.milestone = 0;
   race.mode = 'endless';
   race.finishS = Infinity;
+  race.round = 1;
+  race.rounds = 3;
+  race.wins = {};
   race.gridReady = false;
   race.gridCountdown = false;
   rivals.clear();
   traffic.setRemote(false);
-  net.leave();
-  net.disconnect();
-  laneCount = 4;
-  trafficCount = TRAFFIC.COUNT;
-  road.setLaneCount(laneCount);
+  if (!keepRoom) {
+    race.inLobby = false;
+    net.leave();
+    net.disconnect();
+    laneCount = 4;
+    trafficCount = TRAFFIC.COUNT;
+    road.setLaneCount(laneCount);
+  }
   resetWorld(seed);
   traffic.setCount(trafficCount, player.s, road);
   traffic.effCount = trafficCount;
@@ -501,16 +639,65 @@ function exitRaceToMenu() {
   hud.setMode(mode, true);
 }
 
-function showRaceResults(rows) {
-  exitRaceToMenu();
-  const table = rows.map((r, i) => (i + 1) + '. ' + r.nick + ' — ' + r.score).join('   ·   ');
-  hud.showOverlay('РЕЗУЛЬТАТЫ ГОНКИ', 'PRESS ANY KEY', table);
+// Гонка кончилась, но комната жива: возвращаемся в лобби с тем же кодом.
+// Группа сохраняется — можно сразу начать следующий заезд.
+function backToLobby() {
+  endRaceCleanup(true);
+  race.inLobby = true; // комната жива — мы снова в лобби с тем же кодом
+  state = 'menu';
+  hud.setPlaying(false);
+  hud.setPanel(true);
+  hud.setOverButtons(false);
+  hud.setRaceUi(race.isHost ? 'lobby-host' : 'lobby-guest');
+  hud.setRaceStatus('КОМНАТА: ' + race.code + ' · ИГРОКОВ: ' + race.players.length + (race.isHost ? '' : ' · ЖДЁМ ХОСТА'));
+  hud.renderRacePlayers(race.players, race.hostId, race.myId);
+  hud.showOverlay('RUSH HOUR', '', '');
+  hud.setMode(mode, true);
+  if (race.isHost) net.cfg(raceMode, laneCount, trafficCount); // настройки следующего заезда
 }
 
+// Таблица результатов. Промежуточная — по раунду (ждём следующий заезд),
+// финальная — после 3-го раунда, победитель по победным очкам, дальше — в лобби.
+let resultsTimer = 0;
+function showRaceResults(msg) {
+  race.resultsShown = true;
+  const rows = msg.rows || [];
+  // Запоминаем победные очки по id игроков.
+  for (const r of rows) {
+    if (r.id != null) race.wins[r.id] = r.wins || 0;
+  }
+  const round = Math.max(1, Math.floor(Number(msg.round) || race.round));
+  race.round = round;
+  race.rounds = Math.max(1, Math.floor(Number(msg.rounds) || race.rounds));
+  if (msg.final) {
+    backToLobby();
+    const winner = rows[0] ? rows[0].nick : '';
+    const table = rows
+      .map((r, i) => (i + 1) + '. ' + r.nick + ' — ' + (r.wins || 0) + ' ПБ')
+      .join('   ·   ');
+    hud.showOverlay('ПОБЕДИЛ: ' + winner, 'ЛЮБАЯ КЛАВИША — НАЗАД В ЛОББИ', table);
+  } else {
+    // Промежуточные итоги: лобби не открываем, ждём авто-старт следующего раунда.
+    const table = rows
+      .map((r) => r.nick + (r.roundWin ? ' ★' : '') + ' — ' + (r.wins || 0) + ' ПБ')
+      .join('   ·   ');
+    hud.showOverlay('РАУНД ' + round + ' ИЗ ' + race.rounds, '',
+      table + ' · СЛЕДУЮЩИЙ РАУНД СЕЙЧАС' + (race.mode === 'timed' ? ' · +2 КМ' : ''));
+  }
+  clearTimeout(resultsTimer);
+  resultsTimer = setTimeout(() => {
+    if (!race.resultsShown) return;
+    race.resultsShown = false;
+    hud.showOverlay('RUSH HOUR', '', '');
+    hud.setMode(mode, true);
+  }, 10000);
+}
+
+// Гонка прервана (хост вышел) — комната при этом остаётся, ждём нового хоста.
 function abortRace(reason) {
   if (!race.active && !race.inLobby) return;
-  exitRaceToMenu();
-  hud.setRaceStatus(reason || '');
+  backToLobby();
+  if (reason) hud.toast(reason);
 }
 
 // Обработка сообщений сервера
@@ -574,7 +761,7 @@ net.onMessage = (msg) => {
       hud.setRaceUi('menu');
       hud.setOverButtons(false);
       hud.hideOverlay();
-      hud.toast('ПОЕХАЛИ!');
+      hud.toast('ПОЕХАЛИ! · РАУНД ' + race.round + '/' + race.rounds);
       if (mode === 'mouse') lockPointer();
       break;
     }
@@ -608,7 +795,7 @@ net.onMessage = (msg) => {
       break;
     }
     case 'results':
-      showRaceResults(msg.rows);
+      showRaceResults(msg);
       break;
     case 'aborted':
       abortRace(msg.msg || 'ГОНКА ПРЕРВАНА');
@@ -616,7 +803,11 @@ net.onMessage = (msg) => {
   }
 };
 net.onClose = () => {
-  if (race.active || race.inLobby) abortRace('СЕРВЕР НЕДОСТУПЕН');
+  // Сокет закрыт — комнаты больше нет, выходим полностью.
+  if (race.active || race.inLobby) {
+    exitRaceToMenu();
+    hud.setRaceStatus('СЕРВЕР НЕДОСТУПЕН');
+  }
 };
 
 // Пауза: мир заморожен, настройки доступны; любой ключ/клик — продолжение заезда.
@@ -697,11 +888,13 @@ function gameOver(reason) {
       hud.setBest(metric);
       hud.toast('НОВЫЙ РЕКОРД: ' + metric);
     }
-    submitScore(myNick, metric);
+    submitScore(myNick, metric, runTime);
   } else {
     // Трафик/полосы менялись — результат в общую таблицу не идёт.
     hud.toast('РЕЗУЛЬТАТ НЕ УЧТЁН — НАСТРОЙКИ НЕ СТАНДАРТНЫЕ');
   }
+  // Монеты собранные за заезд — сохраняем в гараж.
+  if (coinsDirty) { saveGarage(); coinsDirty = false; renderGarage(); }
 }
 
 function adjustLanes(d) {
@@ -812,7 +1005,23 @@ addEventListener('keydown', (e) => {
     if (e.code === 'Escape') e.target.blur();
     return;
   }
+  // Показан экран результатов гонки — любая клавиша возвращает в лобби.
+  if (race.resultsShown) {
+    race.resultsShown = false;
+    clearTimeout(resultsTimer);
+    hud.showOverlay('RUSH HOUR', '', '');
+    hud.setMode(mode, true);
+    return;
+  }
   if (KEYS[e.code]) { input[KEYS[e.code]] = true; e.preventDefault(); }
+  // В гараже: ESC — назад, стрелки — листают машины, Enter/пробел — выбрать.
+  if (state === 'garage') {
+    if (e.code === 'Escape') closeGarage();
+    else if (e.code === 'ArrowLeft') garageStep(-1);
+    else if (e.code === 'ArrowRight') garageStep(1);
+    else if (e.code === 'Enter' || e.code === 'Space') garageSelect();
+    return;
+  }
   if (e.code === 'Escape') {
     if (state === 'play') pauseGame();        // гонка жива — ставим на паузу
     else if (state === 'pause') resumeGame(); // ESC — снятие паузы
@@ -867,8 +1076,9 @@ addEventListener('pointermove', (e) => {
 });
 addEventListener('pointerdown', (e) => {
   // Клик по элементам меню — не газ и не «продолжить заезд».
-  const ui = e.target && e.target.closest && e.target.closest('#menu-panel, #over-buttons, #leaderboard, #check-btn');
+  const ui = e.target && e.target.closest && e.target.closest('#menu-panel, #over-buttons, #leaderboard, #check-btn, #garage-screen');
   if (ui) return;
+  if (state === 'garage') return; // в гараже клик мышью ничего не делает
   if (e.button === 0) mouse.gas = true;
   if (e.button === 2) mouse.brake = true;
   if (state === 'play' && mode === 'mouse' && !document.pointerLockElement) lockPointer(); // переподхват после потери захвата
@@ -942,6 +1152,17 @@ hud.el.playBtn.addEventListener('click', () => {
   if (state === 'menu') startGame();
   else if (state === 'pause') resumeGame();
 });
+
+// --- Гараж: отдельный экран с превью машины ---
+hud.el.garageBtn.addEventListener('click', () => {
+  if (!auth.done || state !== 'menu') return;
+  state = 'garage';
+  openGarage();
+});
+hud.el.garageBack.addEventListener('click', () => closeGarage());
+hud.el.garagePrev.addEventListener('click', () => garageStep(-1));
+hud.el.garageNext.addEventListener('click', () => garageStep(1));
+hud.el.garageSelect.addEventListener('click', () => garageSelect());
 hud.el.overRestart.addEventListener('click', () => {
   if (race.active) return; // сетевую гонку рестартить в одиночку нельзя
   if (state === 'over' && overTimer > 0.9) restart();
@@ -966,7 +1187,10 @@ hud.el.overMenu.addEventListener('click', () => {
 });
 document.getElementById('race-create').addEventListener('click', () => {
   if (race.inLobby) endRaceCleanup(); // уже стоим в комнате — выходим и создаём новую
-  net.create(myNick);
+  hud.codeRowOpen = false; // при создании комнаты поле кода не нужно — прячем
+  hud.el.raceCodeRow.style.display = 'none';
+  hud.el.raceCode.value = '';
+  net.create(myNick, { skin: garage.skin, color: garage.color });
   hud.setRaceStatus('СОЗДАЁМ КОМНАТУ...');
 });
 document.getElementById('check-btn').addEventListener('click', async () => {
@@ -984,20 +1208,32 @@ document.getElementById('check-btn').addEventListener('click', async () => {
     delete btn.dataset.busy;
   }
 });
+// Вход в комнату по коду: по «ВОЙТИ» (показ поля), по галочке ✓ и по Enter в поле.
+const tryJoinRoom = () => {
+  const code = hud.el.raceCode.value.trim().toUpperCase();
+  if (code.length !== 4) {
+    hud.setRaceStatus('КОД ИЗ 4 СИМВОЛОВ');
+    hud.el.raceCode.focus();
+    return;
+  }
+  if (race.inLobby) endRaceCleanup(); // из чужой комнаты — сначала выходим
+  net.join(code, myNick, { skin: garage.skin, color: garage.color });
+  hud.setRaceStatus('ПОДКЛЮЧЕНИЕ К ' + code + '...');
+};
 document.getElementById('race-join').addEventListener('click', () => {
   const row = hud.el.raceCodeRow;
   if (row.style.display === 'none' || !row.style.display) {
     if (race.inLobby) endRaceCleanup(); // из чужой комнаты — сначала выходим
+    hud.codeRowOpen = true; // поле открыто — setRaceUi его не спрячет в меню
     row.style.display = 'flex';
     hud.el.raceCode.focus();
     return;
   }
-  const code = hud.el.raceCode.value.trim().toUpperCase();
-  if (code.length === 4) {
-    if (race.inLobby) endRaceCleanup();
-    net.join(code, myNick);
-    hud.setRaceStatus('ПОДКЛЮЧЕНИЕ К ' + code + '...');
-  }
+  tryJoinRoom();
+});
+hud.el.raceGo.addEventListener('click', tryJoinRoom);
+hud.el.raceCode.addEventListener('keydown', (e) => {
+  if (e.code === 'Enter') tryJoinRoom();
 });
 // Кнопку «СТАРТ ГОНКИ» заменила «ГОТОВ» — стартует отсчёт, когда готовы все.
 
@@ -1135,16 +1371,17 @@ function stepPlay(dt) {
   comboTimer -= dt;
   if (comboTimer <= 0) combo = 0;
   score += player.speed * dt;
+  runTime += dt; // время заезда — для таблицы рекордов
 
   // --- Сетевая гонка: рассылка состояния, снапшоты трафика, соперники ---
   if (race.active) {
     stateTimer += dt;
-    if (stateTimer >= 0.07) { stateTimer = 0; net.state(player.s, player.lat, player.speed); }
+    if (stateTimer >= NET.STATE_TICK) { stateTimer = 0; net.state(player.s, player.lat, player.speed); }
     if (race.isHost) {
       trafficTimer += dt;
-      if (trafficTimer >= 0.1) { trafficTimer = 0; net.traffic(traffic.snapshot()); }
+      if (trafficTimer >= NET.TRAFFIC_TICK) { trafficTimer = 0; net.traffic(traffic.snapshot()); }
     }
-    rivals.update(dt, road);
+    rivals.update(dt, road, camera);
     // Гонка на время: финишная арка на фиксированной дистанции.
     if (race.mode === 'timed' && !race.finishedMe) {
       const remaining = race.finishS - player.s;
@@ -1182,6 +1419,15 @@ function stepPlay(dt) {
     hud.toast('НИТРО +');
   });
 
+  // Монетки на дороге — валюта для кастомизации машины.
+  coins.update(dt, player, road, (w) => {
+    garage.coins += COIN.VALUE;
+    hud.setCoins(garage.coins);
+    audio.chime();
+    sparks(fxAdd, w.px, w.py, w.pz, 10, false);
+    coinsDirty = true; // монеты сохраним при выходе из заезда
+  });
+
   // Призрак: запись текущего заезда + повтор лучшего
   recorder.update(dt, player);
   ghost.update(dt, road);
@@ -1206,7 +1452,7 @@ function stepPlay(dt) {
   updateCamera(dt, false);
   audio.engine(player.speed, player.boosting, true, eff.gas);
   hud.update(score, combo, player.speed * 3.6, player.nitro, player.s - 30);
-  minimap.draw(player, road, traffic, pickups, ghost, rivals);
+  minimap.draw(player, road, traffic, pickups, ghost, rivals, coins);
 }
 
 function stepOver(dt) {
@@ -1229,7 +1475,7 @@ function stepOver(dt) {
   audio.engine(player.speed, false, true, false);
   audio.sirenUpdate(dt, 0);
   hud.update(score, combo, player.speed * 3.6, player.nitro, player.s - 30);
-  minimap.draw(player, road, traffic, pickups, ghost, rivals);
+  minimap.draw(player, road, traffic, pickups, ghost, rivals, coins);
   if (overTimer > 1.1 && !overShown) {
     overShown = true;
     const metric = race.active
@@ -1260,7 +1506,10 @@ function stepGrid(dt) {
   road.setPalette(p);
   road.update(player.s);
   propPool.sync(road.props);
-  rivals.update(dt, road);
+  // Позиции шлём и на решётке — иначе соперники не видны до старта.
+  stateTimer += dt;
+  if (stateTimer >= NET.STATE_TICK) { stateTimer = 0; net.state(player.s, player.lat, player.speed); }
+  rivals.update(dt, road, camera);
   fxAdd.update(dt);
   fxSoft.update(dt);
   snow.update(dt, camera.position, 0);
@@ -1269,7 +1518,7 @@ function stepGrid(dt) {
   audio.engine(0, false, false, false);
   audio.sirenUpdate(dt, 0);
   hud.update(score, combo, 0, player.nitro, player.s - 30);
-  minimap.draw(player, road, traffic, pickups, ghost, rivals);
+  minimap.draw(player, road, traffic, pickups, ghost, rivals, coins);
 }
 
 // Пауза: ничего не обновляем, только глушим мотор.
@@ -1292,6 +1541,12 @@ function frame(now) {
   sky.update(camera.position);
   terrain.position.x = player.wx;
   terrain.position.z = player.wz;
+  // Гараж рисуется вместо трассы — со своей сценой и камерой.
+  if (state === 'garage') {
+    garage3d.update(dt);
+    garage3d.render(renderer, innerWidth, innerHeight);
+    return;
+  }
   postfx.render(dt, player.speedNorm, player.boosting);
 }
 
@@ -1303,14 +1558,17 @@ updateCustomWarn();
 hud.updateMenuLabels(settings);
 hud.renderLeaderboard([], null);
 refreshLeaderboard();
+// Применяем сохранённый вид машины.
+const look0 = currentLook();
+player.setLook(look0.skin, look0.hex);
 showAuthGate(); // спрашиваем ник при каждом заходе
 requestAnimationFrame(frame);
 
 // Отладочный крюк (для проверки из консоли/Playwright).
 window.__game = {
-  player, road, traffic, pickups, ghost, camera, startGame, restart,
+  player, road, traffic, pickups, coins, ghost, camera, startGame, restart,
   get state() { return state; },
   get mode() { return mode; },
-  settings, race, rivals, net,
+  settings, race, rivals, net, garage, garage3d, renderer,
   refreshLeaderboard,
 };

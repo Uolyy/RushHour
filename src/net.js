@@ -40,8 +40,9 @@ export class RaceNet {
     else if (this.ws && this.ws.readyState === WebSocket.CONNECTING) this.queue.push(data);
   }
 
-  create(nick) { this.connect(); this.send({ t: 'create', nick }); }
-  join(code, nick) { this.connect(); this.send({ t: 'join', code, nick }); }
+  create(nick, look) { this.connect(); this.send({ t: 'create', nick, ...(look || {}) }); }
+  join(code, nick, look) { this.connect(); this.send({ t: 'join', code, nick, ...(look || {}) }); }
+  look(skin, color) { this.send({ t: 'look', skin, color }); }
   launch() { this.send({ t: 'launch' }); }
   ready2(val) { this.send({ t: 'ready2', val }); }
   cfg(mode, lanes, traffic) { this.send({ t: 'cfg', mode, lanes, traffic }); }
